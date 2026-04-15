@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 
 def get_frame_prompt(
@@ -10,7 +10,7 @@ def get_frame_prompt(
     video_duration_sec: Optional[float] = None,
 ) -> str:
     """Build VLM prompt for frame description, with optional context."""
-    context_parts: list[str] = []
+    context_parts = []  # type: List[str]
     if frame_index is not None and total_frames is not None:
         context_parts.append(
             "This is frame %d of %d." % (frame_index + 1, total_frames)
