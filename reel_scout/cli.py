@@ -37,6 +37,12 @@ def main(argv: List[str] = None) -> None:
     p_analyze.add_argument("--vlm-model", help="VLM model name")
     p_analyze.add_argument("--keyframe-strategy", help="Keyframe strategy (scene, interval, hybrid)")
     p_analyze.add_argument("--keyframe-max", type=int, help="Max keyframes per video")
+    p_analyze.add_argument("--llm-backend", help="LLM backend (omlx, ollama, openclaw)")
+    p_analyze.add_argument("--score", action="store_true", help="Score video after analysis")
+    p_analyze.add_argument("--skip-audio", action="store_true", default=True, help="Skip audio analysis (default: skip)")
+    p_analyze.add_argument("--no-skip-audio", dest="skip_audio", action="store_false", help="Enable audio analysis")
+    p_analyze.add_argument("--skip-diarize", action="store_true", default=True, help="Skip diarization (default: skip)")
+    p_analyze.add_argument("--no-skip-diarize", dest="skip_diarize", action="store_false", help="Enable diarization")
 
     # --- transcribe ---
     p_transcribe = sub.add_parser("transcribe", help="Transcribe a local video/audio")
@@ -65,6 +71,11 @@ def main(argv: List[str] = None) -> None:
     p_export.add_argument("--format", choices=["json", "csv"], default="json")
     p_export.add_argument("--output", "-o", default="./export")
 
+    # --- score ---
+    p_score = sub.add_parser("score", help="Score a video using LLM analysis")
+    p_score.add_argument("video_id", help="Video ID to score")
+    p_score.add_argument("--backend", help="LLM backend (omlx, ollama, openclaw)")
+
     # --- db ---
     p_db = sub.add_parser("db", help="Database operations")
     p_db_sub = p_db.add_subparsers(dest="db_command")
@@ -92,6 +103,7 @@ def main(argv: List[str] = None) -> None:
         "list": _cmd_list,
         "show": _cmd_show,
         "export": _cmd_export,
+        "score": _cmd_score,
         "db": _cmd_db,
         "config": _cmd_config,
     }
@@ -159,6 +171,9 @@ def _cmd_analyze(args) -> None:
     options = PipelineOptions(
         skip_vision=args.skip_vision,
         skip_transcribe=args.skip_transcribe,
+        skip_audio=args.skip_audio,
+        skip_diarize=args.skip_diarize,
+        score=args.score,
         resume=args.resume,
         whisper_backend=args.whisper_backend,
         vlm_backend=args.vlm_backend,
@@ -292,6 +307,46 @@ def _cmd_export(args) -> None:
     conn.close()
 
 
+def _cmd_score(args) -> None:
+    from . import db
+    from .scorer import score_video
+
+    config.ensure_dirs()
+    conn = db.init_db()
+
+    video = db.get_video(conn, args.video_id)
+    if not video:
+        print(f"Video not found: {args.video_id}")
+        conn.close()
+        return
+
+    existing = db.get_score(conn, args.video_id)
+    if existing:
+        print("Score already exists for this video:")
+        print(f"  Overall:    {existing['overall']:.1f}")
+        print(f"  Hook:       {existing['hook_strength']:.1f}")
+        print(f"  Info:       {existing['information_density']:.1f}")
+        print(f"  Emotion:    {existing['emotional_impact']:.1f}")
+        print(f"  Share:      {existing['shareability']:.1f}")
+        print(f"  Reasoning:  {existing['reasoning']}")
+        conn.close()
+        return
+
+    try:
+        score = score_video(conn, args.video_id, llm_backend=args.backend)
+        print(f"Score for: {video['title'] or '(untitled)'}")
+        print(f"  Overall:    {score.overall:.1f}")
+        print(f"  Hook:       {score.hook_strength:.1f}")
+        print(f"  Info:       {score.information_density:.1f}")
+        print(f"  Emotion:    {score.emotional_impact:.1f}")
+        print(f"  Share:      {score.shareability:.1f}")
+        print(f"  Reasoning:  {score.reasoning}")
+    except ValueError as e:
+        print(f"Error: {e}")
+
+    conn.close()
+
+
 def _cmd_db(args) -> None:
     from . import db
 
@@ -383,6 +438,13 @@ def _cmd_config(args) -> None:
             print(f"  VLM:       {config.VLM_BACKEND} @ {vlm_url} (reachable)")
         except Exception:
             print(f"  VLM:       {config.VLM_BACKEND} @ {vlm_url} (NOT reachable)")
+
+        # OpenClaw endpoint
+        try:
+            urllib.request.urlopen(config.OPENCLAW_BASE_URL, timeout=3)
+            print(f"  OpenClaw:  {config.OPENCLAW_BASE_URL} (reachable)")
+        except Exception:
+            print(f"  OpenClaw:  {config.OPENCLAW_BASE_URL} (NOT reachable)")
 
     else:
         print("Use: reel-scout config {show|check}")
