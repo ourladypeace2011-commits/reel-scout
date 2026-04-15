@@ -25,6 +25,11 @@ _MERGE_PROMPT_TEMPLATE = """You are analyzing a short-form video. Based on the t
 {{
   "summary": "1-2 sentence summary of the video content",
   "topics": ["topic1", "topic2"],
+  "timeline": [
+    {{"timestamp": "0-3s", "event": "hook/opening description"}},
+    {{"timestamp": "3-15s", "event": "main content description"}},
+    {{"timestamp": "15-20s", "event": "CTA or closing"}}
+  ],
   "hook": {{
     "opening_type": "question|statement|visual|music|none",
     "opening_text": "first few words or description",
@@ -47,6 +52,8 @@ _MERGE_PROMPT_TEMPLATE = """You are analyzing a short-form video. Based on the t
   }},
   "content_type": "educational|entertainment|promotional|review|story|news"
 }}
+
+The timeline should capture the narrative arc: how the video progresses from hook to main content to conclusion/CTA. Use approximate time ranges.
 
 Return ONLY valid JSON, no explanation."""
 
