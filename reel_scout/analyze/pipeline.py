@@ -21,6 +21,7 @@ class PipelineOptions:
     skip_vision: bool = False
     skip_transcribe: bool = False
     skip_audio: bool = True
+    skip_diarize: bool = True
     resume: bool = False
     whisper_backend: Optional[str] = None
     vlm_backend: Optional[str] = None
@@ -171,6 +172,42 @@ def _process_single(
                         _os.unlink(wav_path)
         except (ImportError, FileNotFoundError) as e:
             print("  Skipping audio analysis: %s" % e, file=sys.stderr)
+
+    # Step 2.7: Speaker diarization
+    if not options.skip_diarize and config.DIARIZE_ENABLED:
+        try:
+            from ..diarize import get_diarizer
+            from ..diarize.align import align_speakers_to_transcript
+            from ..audio.extract import extract_wav
+            transcript = db.get_transcript(conn, video_id)
+            if transcript and transcript["segments_json"]:
+                segments_json = transcript["segments_json"]
+                # Check if already has speaker labels
+                import json as _json
+                segs = _json.loads(segments_json)
+                if segs and "speaker" not in segs[0]:
+                    print("  Running speaker diarization...")
+                    import tempfile
+                    wav_path = tempfile.mktemp(suffix=".wav")
+                    try:
+                        extract_wav(file_path, wav_path)
+                        diarizer = get_diarizer()
+                        result = diarizer.diarize(wav_path)
+                        updated_json = align_speakers_to_transcript(
+                            result.segments, segments_json)
+                        conn.execute(
+                            "UPDATE transcripts SET segments_json=? WHERE video_id=?",
+                            (updated_json, video_id))
+                        conn.commit()
+                        print("  Diarization: %d speakers detected" % result.num_speakers)
+                    finally:
+                        import os as _os2
+                        if _os2.path.exists(wav_path):
+                            _os2.unlink(wav_path)
+                else:
+                    print("  Skipping diarization (already done)")
+        except (ImportError, ValueError) as e:
+            print("  Skipping diarization: %s" % e, file=sys.stderr)
 
     # Step 3: Vision analysis
     if not options.skip_vision:

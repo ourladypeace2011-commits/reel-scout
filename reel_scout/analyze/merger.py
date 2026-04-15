@@ -82,7 +82,19 @@ def merge_analysis(
                 f"[{kf['timestamp_sec']:.1f}s] {vd['description']}"
             )
 
-    transcript_text = transcript["text_full"] if transcript else "(no transcript)"
+    # Build transcript with speaker labels if available
+    if transcript:
+        import json as _json
+        segs = _json.loads(transcript["segments_json"] or "[]")
+        if segs and segs[0].get("speaker"):
+            transcript_text = "\n".join(
+                "[%s] %s" % (s.get("speaker", ""), s.get("text", ""))
+                for s in segs
+            )
+        else:
+            transcript_text = transcript["text_full"]
+    else:
+        transcript_text = "(no transcript)"
     vision_text = "\n".join(vision_texts) if vision_texts else "(no vision data)"
 
     # Gather audio events
