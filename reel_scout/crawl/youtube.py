@@ -42,6 +42,7 @@ class YouTubeCrawler(BaseCrawler):
             "yt-dlp",
             "--dump-json",
             "--no-download",
+            "--remote-components", "ejs:github",
             url,
         ]
         result = subprocess.run(
@@ -59,6 +60,7 @@ class YouTubeCrawler(BaseCrawler):
             "--merge-output-format", "mp4",
             "-o", output_template,
             "--no-playlist",
+            "--remote-components", "ejs:github",
             url,
         ]
         result = subprocess.run(
