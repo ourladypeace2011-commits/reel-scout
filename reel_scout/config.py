@@ -62,6 +62,10 @@ AUDIO_HOP_SEC = float(os.getenv("AUDIO_HOP_SEC", "1.0"))
 # --- External tools ---
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 
+# --- Diarization ---
+DIARIZE_ENABLED = os.getenv("DIARIZE_ENABLED", "false").lower() in ("true", "1", "yes")
+PYANNOTE_AUTH_TOKEN = os.getenv("PYANNOTE_AUTH_TOKEN", "")
+
 # --- Optional ---
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
@@ -97,6 +101,8 @@ def show() -> str:
         f"AUDIO_WINDOW_SEC:     {AUDIO_WINDOW_SEC}",
         f"AUDIO_HOP_SEC:        {AUDIO_HOP_SEC}",
         f"FFMPEG_BIN:           {FFMPEG_BIN}",
+        f"DIARIZE_ENABLED:      {DIARIZE_ENABLED}",
+        f"PYANNOTE_AUTH_TOKEN:  {'***' if PYANNOTE_AUTH_TOKEN else '(not set)'}",
         f"WEBHOOK_URL:          {WEBHOOK_URL or '(not set)'}",
     ]
     return "\n".join(lines)

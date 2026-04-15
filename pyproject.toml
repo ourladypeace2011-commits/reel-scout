@@ -20,6 +20,7 @@ dependencies = [
 whisper = ["faster-whisper>=0.10.0"]
 audio = ["onnxruntime>=1.15.0", "numpy>=1.21.0"]
 vector = ["lancedb>=0.4.0", "chromadb>=0.4.0"]
+diarize = ["pyannote.audio>=3.1", "torch>=2.0"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
