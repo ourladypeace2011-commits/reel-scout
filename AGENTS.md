@@ -11,24 +11,31 @@ Short-form video analysis CLI tool. Crawls YT Shorts / IG Reels / TikTok via yt-
 - No hardcoded IPs, API keys, or passwords
 - Tests use `pytest`; run `pytest -v` to verify
 
-## 當前任務：Task A1 — MCP Server
+## 已完成任務
+- **Task A1 — MCP Server**: `docs/task-a1-mcp-handover.md` — PASS with notes ✓
 
-**完整執行計畫**: `docs/task-a1-mcp-handover.md`
+## 當前任務：Task E1 — LLM Backend 抽象化
+
+**完整執行計畫**: `docs/task-e1-llm-backend-handover.md`
 
 ### 改動範圍
 | 檔案 | 改動 |
 |------|------|
-| `reel_scout/mcp/__init__.py` | 新建（空 init） |
-| `reel_scout/mcp/server.py` | 新建：stdio JSON-RPC transport (~120 行) |
-| `reel_scout/mcp/tools.py` | 新建：5 個 MCP tool handlers (~200 行) |
-| `tests/test_mcp.py` | 新建：8 個測試 |
-| `pyproject.toml` | 加 `reel-scout-mcp` entry point |
+| `reel_scout/llm/__init__.py` | 新建：get_llm() factory |
+| `reel_scout/llm/base.py` | 新建：BaseLLM ABC |
+| `reel_scout/llm/omlx.py` | 新建：oMLX backend（從 merger.py 提取） |
+| `reel_scout/llm/ollama.py` | 新建：Ollama backend |
+| `reel_scout/llm/openclaw.py` | 新建：OpenClaw/Claude backend |
+| `reel_scout/analyze/merger.py` | 修改：刪 _call_llm()，改用 get_llm() |
+| `reel_scout/config.py` | 修改：新增 LLM_BACKEND, OPENCLAW_* 設定 |
+| `tests/test_llm.py` | 新建：8 個測試 |
+| `.env.example` | 修改：新增 LLM/OpenClaw 設定 |
 
 ### 不改的檔案
-- `db.py`, `config.py`, `cli.py`, `crawl/`, `transcribe/`, `vision/`, `analyze/`, `export/` — MCP layer 只調用這些模組，不修改
+- `cli.py`, `mcp/`, `crawl/`, `transcribe/`, `vision/`, `db.py`, `pipeline.py`, `export/`
 
 ### Commit Strategy
-單一 commit: `feat(mcp): add MCP server with stdio transport and 5 tools`
+單一 commit: `feat(llm): extract LLM backend abstraction with omlx/ollama/openclaw support`
 
 ### 自審 Checklist（完成後必填）
-見 `docs/task-a1-mcp-handover.md` 底部的完整 checklist。
+見 `docs/task-e1-llm-backend-handover.md` 底部的完整 checklist。
