@@ -4,16 +4,10 @@ import base64
 import json
 import urllib.request
 
-from .base import BaseVLM, FrameDescription
+from typing import Optional
 
-_PROMPT = (
-    "Describe this frame from a short-form video. Include:\n"
-    "1. Visual elements (people, objects, text overlays, backgrounds)\n"
-    "2. Any on-screen text (OCR)\n"
-    "3. Estimated mood/energy level\n"
-    "4. Production style (talking head, b-roll, screen recording, etc.)\n"
-    "Be concise. 2-3 sentences max."
-)
+from .base import BaseVLM, FrameDescription
+from .prompts import get_frame_prompt
 
 
 class OmlxVLM(BaseVLM):
@@ -21,7 +15,16 @@ class OmlxVLM(BaseVLM):
         self._base_url = base_url.rstrip("/")
         self._model = model
 
-    def describe_frame(self, image_path: str) -> FrameDescription:
+    def describe_frame(
+        self,
+        image_path: str,
+        frame_index: Optional[int] = None,
+        total_frames: Optional[int] = None,
+        timestamp_sec: Optional[float] = None,
+        video_duration_sec: Optional[float] = None,
+    ) -> FrameDescription:
+        prompt = get_frame_prompt(frame_index, total_frames, timestamp_sec, video_duration_sec)
+
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
@@ -42,7 +45,7 @@ class OmlxVLM(BaseVLM):
                                 "url": f"data:{mime};base64,{img_b64}"
                             },
                         },
-                        {"type": "text", "text": _PROMPT},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],

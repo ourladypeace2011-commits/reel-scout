@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -16,6 +16,13 @@ class FrameDescription:
 
 class BaseVLM(abc.ABC):
     @abc.abstractmethod
-    def describe_frame(self, image_path: str) -> FrameDescription:
+    def describe_frame(
+        self,
+        image_path: str,
+        frame_index: Optional[int] = None,
+        total_frames: Optional[int] = None,
+        timestamp_sec: Optional[float] = None,
+        video_duration_sec: Optional[float] = None,
+    ) -> FrameDescription:
         """Describe a single keyframe image."""
         ...
