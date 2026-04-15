@@ -23,6 +23,7 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 reel-scout = "reel_scout.cli:main"
+reel-scout-mcp = "reel_scout.mcp.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
