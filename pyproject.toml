@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reel-scout"
+version = "0.1.0"
+description = "Short-form video analysis tool — crawl, transcribe, and visually analyze YouTube Shorts, Instagram Reels, and TikTok"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "Hevin Yeh" }]
+keywords = ["video", "analysis", "shorts", "reels", "tiktok", "whisper", "vlm"]
+
+dependencies = [
+    "yt-dlp>=2024.1.0",
+]
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=0.10.0"]
+vector = ["lancedb>=0.4.0", "chromadb>=0.4.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+reel-scout = "reel_scout.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--tb=short -q"
