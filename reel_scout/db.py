@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -135,6 +135,27 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Add scores table (schema v2 -> v3)."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS scores (
+            video_id        TEXT PRIMARY KEY REFERENCES videos(id),
+            hook_strength   REAL,
+            information_density REAL,
+            emotional_impact REAL,
+            shareability    REAL,
+            overall         REAL,
+            reasoning       TEXT,
+            model_used      TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.execute(
+        "UPDATE schema_version SET version = 3 WHERE version = 2"
+    )
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         conn = get_connection()
@@ -149,6 +170,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
         current_ver = row[0] if row else 0
         if current_ver < 2:
             _migrate_v1_to_v2(conn)
+            current_ver = 2
+        if current_ver < 3:
+            _migrate_v2_to_v3(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -163,6 +187,18 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
         );
 
         CREATE INDEX IF NOT EXISTS idx_audio_events_video ON audio_events(video_id);
+
+        CREATE TABLE IF NOT EXISTS scores (
+            video_id        TEXT PRIMARY KEY REFERENCES videos(id),
+            hook_strength   REAL,
+            information_density REAL,
+            emotional_impact REAL,
+            shareability    REAL,
+            overall         REAL,
+            reasoning       TEXT,
+            model_used      TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
     return conn
@@ -352,6 +388,38 @@ def get_audio_events(
     ).fetchall()
 
 
+# --- Score CRUD ---
+
+def save_score(
+    conn: sqlite3.Connection,
+    video_id: str,
+    score: Any,
+) -> None:
+    """Insert or replace a video score. Accepts a VideoScore dataclass."""
+    conn.execute(
+        """INSERT OR REPLACE INTO scores
+           (video_id, hook_strength, information_density, emotional_impact,
+            shareability, overall, reasoning, model_used)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            video_id,
+            score.hook_strength,
+            score.information_density,
+            score.emotional_impact,
+            score.shareability,
+            score.overall,
+            score.reasoning,
+            score.model_used,
+        ),
+    )
+    conn.commit()
+
+
+def get_score(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:
+    cur = conn.execute("SELECT * FROM scores WHERE video_id = ?", (video_id,))
+    return cur.fetchone()
+
+
 # --- Analysis CRUD ---
 
 def save_analysis(
@@ -463,7 +531,7 @@ def mark_batch_completed(conn: sqlite3.Connection, batch_id: str) -> None:
 
 def db_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
     stats = {}
-    for table in ["videos", "transcripts", "keyframes", "vision_descriptions", "analyses", "audio_events", "batches"]:
+    for table in ["videos", "transcripts", "keyframes", "vision_descriptions", "analyses", "audio_events", "scores", "batches"]:
         cur = conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608 - table names are hardcoded
         stats[table] = cur.fetchone()[0]
 
