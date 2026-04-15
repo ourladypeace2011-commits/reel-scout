@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import urllib.request
 from typing import Optional
 
 from .. import config, db
+from ..llm import get_llm
 
 _MERGE_PROMPT_TEMPLATE = """You are analyzing a short-form video. Based on the transcript and visual descriptions below, produce a structured JSON analysis.
 
@@ -84,8 +84,8 @@ def merge_analysis(
         vision_descriptions=vision_text,
     )
 
-    # Call local LLM via oMLX (OpenAI-compatible)
-    result_json = _call_llm(prompt)
+    llm = get_llm()
+    result_json = llm.complete(prompt, max_tokens=800, temperature=0.1)
 
     try:
         data = json.loads(result_json)
@@ -109,26 +109,3 @@ def merge_analysis(
         ),
         full_json=json.dumps(data, ensure_ascii=False),
     )
-
-
-def _call_llm(prompt: str) -> str:
-    """Call local LLM via OpenAI-compatible API."""
-    payload = {
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 800,
-        "temperature": 0.1,
-    }
-    if config.VLM_MODEL:
-        payload["model"] = config.VLM_MODEL
-
-    url = f"{config.OMLX_BASE_URL}/chat/completions"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"},
-    )
-
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
-
-    return result["choices"][0]["message"]["content"]

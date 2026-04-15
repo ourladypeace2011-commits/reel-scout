@@ -36,6 +36,12 @@ VLM_MODEL = os.getenv("VLM_MODEL", "")
 OMLX_BASE_URL = os.getenv("OMLX_BASE_URL", "http://localhost:8000/v1")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+# --- LLM (for merger/scorer) ---
+LLM_BACKEND = os.getenv("LLM_BACKEND", "omlx")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
+OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "")
+
 # --- Whisper ---
 WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "faster-whisper")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3")
@@ -72,6 +78,10 @@ def show() -> str:
         f"VLM_MODEL:            {VLM_MODEL or '(auto)'}",
         f"OMLX_BASE_URL:        {OMLX_BASE_URL}",
         f"OLLAMA_BASE_URL:      {OLLAMA_BASE_URL}",
+        f"LLM_BACKEND:          {LLM_BACKEND}",
+        f"LLM_MODEL:            {LLM_MODEL or '(auto)'}",
+        f"OPENCLAW_BASE_URL:    {OPENCLAW_BASE_URL}",
+        f"OPENCLAW_MODEL:       {OPENCLAW_MODEL or '(auto)'}",
         f"WHISPER_BACKEND:      {WHISPER_BACKEND}",
         f"WHISPER_MODEL:        {WHISPER_MODEL}",
         f"IG_COOKIES_FILE:      {IG_COOKIES_FILE or '(not set)'}",
