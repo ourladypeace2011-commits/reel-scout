@@ -20,6 +20,7 @@ from .merger import merge_analysis
 class PipelineOptions:
     skip_vision: bool = False
     skip_transcribe: bool = False
+    skip_audio: bool = True
     resume: bool = False
     whisper_backend: Optional[str] = None
     vlm_backend: Optional[str] = None
@@ -140,6 +141,36 @@ def _process_single(
                 whisper_model=result.model,
                 duration_sec=result.duration_sec,
             )
+
+    # Step 2.5: Audio analysis
+    if not options.skip_audio:
+        try:
+            from ..audio import get_audio_analyzer
+            from ..audio.extract import extract_wav
+            existing_audio = db.get_audio_events(conn, video_id)
+            if existing_audio:
+                print("  Skipping audio analysis (already done)")
+            else:
+                print("  Analyzing audio events...")
+                import tempfile
+                wav_path = tempfile.mktemp(suffix=".wav")
+                try:
+                    extract_wav(file_path, wav_path)
+                    analyzer = get_audio_analyzer()
+                    timeline = analyzer.analyze(wav_path)
+                    events_data = [
+                        {"event_type": e.event_type, "label": e.label,
+                         "start_sec": e.start_sec, "end_sec": e.end_sec,
+                         "confidence": e.confidence}
+                        for e in timeline.events
+                    ]
+                    db.save_audio_events(conn, video_id, events_data)
+                finally:
+                    import os as _os
+                    if _os.path.exists(wav_path):
+                        _os.unlink(wav_path)
+        except (ImportError, FileNotFoundError) as e:
+            print("  Skipping audio analysis: %s" % e, file=sys.stderr)
 
     # Step 3: Vision analysis
     if not options.skip_vision:

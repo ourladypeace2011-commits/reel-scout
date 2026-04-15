@@ -21,6 +21,9 @@ _MERGE_PROMPT_TEMPLATE = """You are analyzing a short-form video. Based on the t
 ## Visual Descriptions (keyframes)
 {vision_descriptions}
 
+## Audio Events
+{audio_events}
+
 ## Output Format (JSON only, no markdown)
 {{
   "summary": "1-2 sentence summary of the video content",
@@ -82,6 +85,17 @@ def merge_analysis(
     transcript_text = transcript["text_full"] if transcript else "(no transcript)"
     vision_text = "\n".join(vision_texts) if vision_texts else "(no vision data)"
 
+    # Gather audio events
+    audio_events = db.get_audio_events(conn, video_id)
+    audio_text = "(no audio analysis)"
+    if audio_events:
+        audio_lines = []
+        for ae in audio_events:
+            audio_lines.append("[%.1fs-%.1fs] %s: %s (%.0f%%)" % (
+                ae["start_sec"], ae["end_sec"], ae["event_type"],
+                ae["label"], ae["confidence"] * 100))
+        audio_text = "\n".join(audio_lines)
+
     prompt = _MERGE_PROMPT_TEMPLATE.format(
         title=video["title"] or "(untitled)",
         platform=video["platform"],
@@ -89,6 +103,7 @@ def merge_analysis(
         uploader=video["uploader"] or "(unknown)",
         transcript=transcript_text,
         vision_descriptions=vision_text,
+        audio_events=audio_text,
     )
 
     llm = get_llm()
