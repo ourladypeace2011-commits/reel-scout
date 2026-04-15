@@ -54,6 +54,11 @@ RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
 KEYFRAME_STRATEGY = os.getenv("KEYFRAME_STRATEGY", "scene")
 KEYFRAME_MAX = int(os.getenv("KEYFRAME_MAX", "8"))
 
+# --- Audio ---
+PANNS_MODEL_PATH = os.getenv("PANNS_MODEL_PATH", "")
+AUDIO_WINDOW_SEC = float(os.getenv("AUDIO_WINDOW_SEC", "2.0"))
+AUDIO_HOP_SEC = float(os.getenv("AUDIO_HOP_SEC", "1.0"))
+
 # --- External tools ---
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 
@@ -88,6 +93,9 @@ def show() -> str:
         f"RATE_LIMIT_PER_MINUTE:{RATE_LIMIT_PER_MINUTE}",
         f"KEYFRAME_STRATEGY:    {KEYFRAME_STRATEGY}",
         f"KEYFRAME_MAX:         {KEYFRAME_MAX}",
+        f"PANNS_MODEL_PATH:     {PANNS_MODEL_PATH or '(not set)'}",
+        f"AUDIO_WINDOW_SEC:     {AUDIO_WINDOW_SEC}",
+        f"AUDIO_HOP_SEC:        {AUDIO_HOP_SEC}",
         f"FFMPEG_BIN:           {FFMPEG_BIN}",
         f"WEBHOOK_URL:          {WEBHOOK_URL or '(not set)'}",
     ]

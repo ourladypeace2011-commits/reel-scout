@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -113,6 +113,28 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add audio_events table (schema v1 -> v2)."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS audio_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            event_type      TEXT NOT NULL,
+            label           TEXT,
+            start_sec       REAL,
+            end_sec         REAL,
+            confidence      REAL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_video ON audio_events(video_id);
+    """)
+    conn.execute(
+        "UPDATE schema_version SET version = 2 WHERE version = 1"
+    )
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         conn = get_connection()
@@ -122,6 +144,26 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     row = cur.fetchone()
     if row is None:
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.commit()
+    else:
+        current_ver = row[0] if row else 0
+        if current_ver < 2:
+            _migrate_v1_to_v2(conn)
+    # Always ensure audio_events table exists for fresh installs
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS audio_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            event_type      TEXT NOT NULL,
+            label           TEXT,
+            start_sec       REAL,
+            end_sec         REAL,
+            confidence      REAL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_video ON audio_events(video_id);
+    """)
     conn.commit()
     return conn
 
@@ -276,6 +318,40 @@ def save_vision_description(
     conn.commit()
 
 
+# --- Audio Events CRUD ---
+
+def save_audio_events(
+    conn: sqlite3.Connection,
+    video_id: str,
+    events: List[Dict[str, Any]],
+) -> None:
+    """Bulk insert audio events for a video."""
+    for ev in events:
+        conn.execute(
+            """INSERT INTO audio_events
+               (video_id, event_type, label, start_sec, end_sec, confidence)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                video_id,
+                ev["event_type"],
+                ev.get("label", ""),
+                ev.get("start_sec"),
+                ev.get("end_sec"),
+                ev.get("confidence"),
+            ),
+        )
+    conn.commit()
+
+
+def get_audio_events(
+    conn: sqlite3.Connection, video_id: str
+) -> List[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM audio_events WHERE video_id = ? ORDER BY start_sec",
+        (video_id,),
+    ).fetchall()
+
+
 # --- Analysis CRUD ---
 
 def save_analysis(
@@ -387,7 +463,7 @@ def mark_batch_completed(conn: sqlite3.Connection, batch_id: str) -> None:
 
 def db_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
     stats = {}
-    for table in ["videos", "transcripts", "keyframes", "vision_descriptions", "analyses", "batches"]:
+    for table in ["videos", "transcripts", "keyframes", "vision_descriptions", "analyses", "audio_events", "batches"]:
         cur = conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608 - table names are hardcoded
         stats[table] = cur.fetchone()[0]
 
