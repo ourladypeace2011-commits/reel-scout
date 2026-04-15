@@ -57,6 +57,10 @@ KEYFRAME_MAX = int(os.getenv("KEYFRAME_MAX", "8"))
 # --- External tools ---
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 
+# --- Diarization ---
+DIARIZE_ENABLED = os.getenv("DIARIZE_ENABLED", "false").lower() in ("true", "1", "yes")
+PYANNOTE_AUTH_TOKEN = os.getenv("PYANNOTE_AUTH_TOKEN", "")
+
 # --- Optional ---
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
@@ -89,6 +93,8 @@ def show() -> str:
         f"KEYFRAME_STRATEGY:    {KEYFRAME_STRATEGY}",
         f"KEYFRAME_MAX:         {KEYFRAME_MAX}",
         f"FFMPEG_BIN:           {FFMPEG_BIN}",
+        f"DIARIZE_ENABLED:      {DIARIZE_ENABLED}",
+        f"PYANNOTE_AUTH_TOKEN:  {'***' if PYANNOTE_AUTH_TOKEN else '(not set)'}",
         f"WEBHOOK_URL:          {WEBHOOK_URL or '(not set)'}",
     ]
     return "\n".join(lines)
