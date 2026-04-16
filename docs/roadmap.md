@@ -35,6 +35,9 @@ Phase 5  ░░░░░░░░░░░░░░░░░░░░  ⬜ Distr
 ### 3A. 批量爬取 + 頻道模式 ✅ (部分完成)
 
 - [x] `reel-scout browse <profile_url>` — 帳號頁瀏覽，列出所有 reels（`--flat-playlist --dump-json`）(2026-04-16)
+- [x] IG browse: instaloader fallback（yt-dlp IG user extractor broken as of 2026.4）(2026-04-16)
+- [x] browse 三種輸出模式：human-readable / --json / --urls-only (2026-04-16)
+- [x] pyproject.toml: `instagram` optional dependency group (2026-04-16)
 - [ ] `reel-scout crawl --channel <URL> --limit 50` — 批量爬取頻道最新 N 支（browse → crawl 整合）
 - [ ] `reel-scout crawl --trending --platform youtube --limit 30` — 平台趨勢影片
 - [ ] `reel-scout crawl --playlist <URL>` — 播放清單批量
