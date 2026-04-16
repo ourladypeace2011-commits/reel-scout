@@ -4,7 +4,7 @@ import json
 import os
 import re
 import subprocess
-from typing import Optional
+from typing import List, Optional
 
 from .base import BaseCrawler, VideoMeta
 from .rate_limiter import get_limiter
@@ -85,3 +85,47 @@ class YouTubeCrawler(BaseCrawler):
             file_path=file_path,
             file_size_bytes=file_size,
         )
+
+    def browse(self, url: str, limit: int = 30) -> List[VideoMeta]:
+        """List videos from a YouTube channel/playlist page."""
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--dump-json",
+            "--no-download",
+            "--playlist-end", str(limit),
+            "--remote-components", "ejs:github",
+            url,
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp browse failed: {result.stderr[:500]}")
+
+        entries = []
+        for line in result.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                info = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            vid = info.get("id", "")
+            entry_url = info.get("url") or info.get("webpage_url", "")
+            if not entry_url and vid:
+                entry_url = f"https://www.youtube.com/watch?v={vid}"
+
+            entries.append(VideoMeta(
+                platform=self.platform,
+                platform_id=vid,
+                url=entry_url,
+                title=info.get("title", ""),
+                uploader=info.get("uploader", info.get("channel", "")),
+                duration_sec=float(info.get("duration") or 0),
+                upload_date=info.get("upload_date", ""),
+            ))
+
+        return entries

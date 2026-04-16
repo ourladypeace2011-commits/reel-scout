@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -33,3 +33,11 @@ class BaseCrawler(abc.ABC):
     def extract_id(self, url: str) -> str:
         """Extract platform-specific video ID from URL."""
         ...
+
+    def browse(self, url: str, limit: int = 30) -> List[VideoMeta]:
+        """List videos from a channel/profile page without downloading.
+
+        Returns a list of VideoMeta with metadata only (no file_path).
+        Subclasses may override for platform-specific behavior.
+        """
+        raise NotImplementedError(f"{self.platform} does not support browse")

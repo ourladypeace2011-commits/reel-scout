@@ -35,3 +35,16 @@ def get_crawler(url: str) -> BaseCrawler:
     if platform is None or platform not in _CRAWLERS:
         raise ValueError(f"Unsupported platform for URL: {url}")
     return _CRAWLERS[platform]()
+
+
+def is_profile_url(url: str) -> bool:
+    """Check if a URL is a profile/channel page rather than a single video."""
+    platform = detect_platform(url)
+    if platform == "instagram":
+        return InstagramCrawler().is_profile_url(url)
+    if platform == "youtube":
+        # Channel, @handle, or /shorts tab
+        return bool(re.search(
+            r"youtube\.com/(?:@[^/]+|channel/|c/|user/|[^/]+/shorts)", url
+        ))
+    return False

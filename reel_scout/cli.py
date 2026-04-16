@@ -19,6 +19,14 @@ def main(argv: List[str] = None) -> None:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
+    # --- browse ---
+    p_browse = sub.add_parser("browse", help="List videos from a profile/channel page")
+    p_browse.add_argument("url", help="Profile/channel URL (e.g. instagram.com/user/reels/)")
+    p_browse.add_argument("--limit", "-n", type=int, default=30, help="Max videos to list (default: 30)")
+    p_browse.add_argument("--cookies", help="Path to cookies file (for IG)")
+    p_browse.add_argument("--json", dest="output_json", action="store_true", help="Output as JSON")
+    p_browse.add_argument("--urls-only", action="store_true", help="Output only URLs (pipe to crawl --file)")
+
     # --- crawl ---
     p_crawl = sub.add_parser("crawl", help="Download videos")
     p_crawl.add_argument("urls", nargs="*", help="Video URLs")
@@ -96,6 +104,7 @@ def main(argv: List[str] = None) -> None:
         return
 
     handlers = {
+        "browse": _cmd_browse,
         "crawl": _cmd_crawl,
         "analyze": _cmd_analyze,
         "transcribe": _cmd_transcribe,
@@ -119,6 +128,47 @@ def _collect_urls(args) -> List[str]:
                 if line and not line.startswith("#"):
                     urls.append(line)
     return urls
+
+
+def _cmd_browse(args) -> None:
+    from .crawl import get_crawler
+
+    if args.cookies:
+        os.environ["IG_COOKIES_FILE"] = args.cookies
+
+    try:
+        crawler = get_crawler(args.url)
+        entries = crawler.browse(args.url, limit=args.limit)
+    except NotImplementedError as e:
+        print(f"Error: {e}")
+        return
+    except Exception as e:
+        print(f"Error browsing: {e}")
+        return
+
+    if not entries:
+        print("No videos found.")
+        return
+
+    if args.urls_only:
+        for e in entries:
+            print(e.url)
+        return
+
+    if args.output_json:
+        import dataclasses
+        data = [dataclasses.asdict(e) for e in entries]
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+
+    print(f"Found {len(entries)} videos from @{entries[0].uploader or '?'}:\n")
+    for i, e in enumerate(entries, 1):
+        title = (e.title or "(untitled)")[:60]
+        dur = f"{e.duration_sec:.0f}s" if e.duration_sec else "?"
+        date = e.upload_date or "?"
+        print(f"  {i:3d}. [{dur:>5s}] {title}")
+        print(f"       {e.url}")
+    print(f"\nTip: pipe URLs to crawl with: reel-scout browse {args.url} --urls-only | reel-scout crawl --file -")
 
 
 def _cmd_crawl(args) -> None:
