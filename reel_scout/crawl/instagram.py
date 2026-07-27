@@ -10,13 +10,18 @@ from .base import BaseCrawler, VideoMeta
 from .rate_limiter import get_limiter
 from . import ytdlp
 from .. import config
+from .. import ffprobe
 
 
 class InstagramCrawler(BaseCrawler):
     platform = "instagram"
 
-    # Single post/reel URL
-    _SINGLE_RE = re.compile(r"instagram\.com/(?:p|reel|reels)/([a-zA-Z0-9_-]+)")
+    # Single post/reel URL. The account-scoped form
+    # (instagram.com/<handle>/reel/<code>/) is what Instagram's own share
+    # button produces, so it must parse as readily as the canonical form.
+    _SINGLE_RE = re.compile(
+        r"instagram\.com/(?:[a-zA-Z0-9_.]+/)?(?:p|reel|reels)/([a-zA-Z0-9_-]+)"
+    )
     # Profile/channel page (with optional /reels/ tab)
     _PROFILE_RE = re.compile(r"instagram\.com/([a-zA-Z0-9_.]+)(?:/reels)?/?$")
 
@@ -76,13 +81,21 @@ class InstagramCrawler(BaseCrawler):
         file_path = expected if os.path.exists(expected) else ""
         file_size = os.path.getsize(file_path) if file_path else 0
 
+        # yt-dlp routinely reports no duration for Instagram. Writing 0.0 is
+        # worse than it looks: it is a *real* value, so the COALESCE-based
+        # repair paths downstream treat duration as already known and never
+        # correct it. We hold the file already, so measure it.
+        duration = float(info.get("duration") or 0)
+        if not duration and file_path:
+            duration = ffprobe.probe_duration(file_path) or 0.0
+
         return VideoMeta(
             platform=self.platform,
             platform_id=post_id,
             url=url,
             title=info.get("title", info.get("description", "")[:100]),
             uploader=info.get("uploader", info.get("uploader_id", "")),
-            duration_sec=float(info.get("duration", 0)),
+            duration_sec=duration,
             upload_date=info.get("upload_date", ""),
             file_path=file_path,
             file_size_bytes=file_size,

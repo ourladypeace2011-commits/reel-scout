@@ -20,7 +20,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
-from . import config
+from . import config, ffprobe
 
 # showinfo prints one line per SELECTED frame; with select='gt(scene,T)' only
 # scene-change frames pass, so a pts_time count == number of hard cuts.
@@ -38,19 +38,11 @@ class ShotMetrics:
 def _probe_duration(video_path: str) -> Optional[float]:
     """Strict duration probe — returns None (never a fabricated fallback) on
     failure, matching pipeline._probe_duration. A wrong denominator would make
-    cuts_per_minute a lie, so we'd rather emit nothing."""
-    cmd = [
-        config.FFMPEG_BIN.replace("ffmpeg", "ffprobe"),
-        "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "csv=p=0",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return float(result.stdout.strip())
-    except (ValueError, TypeError, OSError, subprocess.SubprocessError):
-        return None
+    cuts_per_minute a lie, so we'd rather emit nothing.
+
+    Thin wrapper kept so existing callers and test patches keep working; the
+    implementation is shared in `reel_scout.ffprobe`."""
+    return ffprobe.probe_duration(video_path)
 
 
 def parse_cut_count(stderr: str) -> int:

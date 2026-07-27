@@ -99,6 +99,42 @@ choice. Only interface labels translate — the model's own output (transcript,
 descriptions, decoded values) is left exactly as produced. (This is the *interface*
 language; for bilingual *audio* transcription, see the section below.)
 
+## Instagram links
+
+**Paste the link however Instagram gave it to you.** Both forms work — the
+canonical one and the account-scoped one the share button produces:
+
+```
+https://www.instagram.com/reel/Da3UcDsudRN/                    # canonical
+https://www.instagram.com/zacharywinterton/reel/Da3UcDsudRN/   # share button
+```
+
+**Most public reels need no login.** In a 24-clip batch run, 20 of 21 Instagram
+reels downloaded fine with no cookies at all; **one** hit the login wall and
+failed in about three seconds with `Instagram sent an empty media response`.
+
+So treat cookies as a **retry step, not a prerequisite** — run the batch first,
+then re-run the handful that failed:
+
+```bash
+# 1. export cookies for the reels that failed (Chrome or Brave; Safari's
+#    binarycookies file is not readable)
+yt-dlp --cookies-from-browser chrome --cookies /tmp/ig_cookies.txt \
+       --skip-download "https://www.instagram.com/reel/<code>/"
+
+# 2. retry just those
+IG_COOKIES_FILE=/tmp/ig_cookies.txt reel-scout analyze "<url>" --score
+```
+
+> **The cookie file contains a live Instagram session.** Keep it out of the repo
+> and out of any synced folder, and delete it when the retry is done.
+
+**Timing.** An Instagram reel costs roughly the same regardless of length —
+there is no subtitle track to read, so every clip is transcribed locally. Budget
+around **3 minutes per reel** whether it runs 10 seconds or 70. (YouTube is the
+opposite: a video that ships subtitles skips transcription entirely and finishes
+far faster than its runtime suggests.)
+
 ## Bilingual / code-switching audio (中英對照)
 
 Whisper `large-v3` locks onto the language it detects in the opening window and, on

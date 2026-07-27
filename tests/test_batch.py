@@ -282,3 +282,32 @@ def test_a_broken_progress_sink_does_not_kill_the_job(temp_db, tmp_path, monkeyp
                              on_progress=explode)
 
     assert len(result["done"]) == 1
+
+
+# --- URL harvesting --------------------------------------------------------
+#
+# The batch list regex had the same account-scoped blind spot as the crawler,
+# but failed worse: the crawler at least raises, whereas an unmatched line here
+# is silently dropped from the batch — the run reports success on fewer clips
+# than the sheet contained.
+
+def test_an_account_scoped_reel_link_is_not_silently_dropped():
+    rows = batch.parse_rows("Zachary\thttps://www.instagram.com/zacharywinterton/reel/Da3UcDsudRN/")
+    assert [u for _, u in rows] == [
+        "https://www.instagram.com/zacharywinterton/reel/Da3UcDsudRN/"
+    ]
+
+
+def test_canonical_and_account_scoped_links_both_survive_a_mixed_list():
+    text = "\n".join([
+        "https://www.instagram.com/reel/AAAAAAAAAAA/",
+        "https://www.instagram.com/some.user_1/reel/BBBBBBBBBBB/",
+        "https://www.instagram.com/someuser/p/CCCCCCCCCCC/",
+    ])
+    assert len(batch.parse_rows(text)) == 3
+
+
+def test_a_bare_profile_link_is_still_left_alone():
+    """Profiles are not ingestible clips; harvesting one would send the batch
+    off to download a page."""
+    assert batch.parse_rows("https://www.instagram.com/someuser/") == []

@@ -36,7 +36,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 #: Drive links and long-form YouTube too; those are not silently attempted.
 URL_RE = re.compile(
     r"https?://(?:www\.)?("
-    r"instagram\.com/(?:reel|reels|p)/[\w\-]+"
+    # The account-scoped form (instagram.com/<handle>/reel/<code>/) is what
+    # Instagram's share button emits. Missing it here is worse than the
+    # crawler's parse error: a batch list silently drops those rows.
+    r"instagram\.com/(?:[\w.]+/)?(?:reel|reels|p)/[\w\-]+"
     r"|(?:vm\.|vt\.)?tiktok\.com/[^\s,\"'）)]+"
     r"|youtube\.com/shorts/[\w\-]+"
     r"|youtu\.be/[\w\-]+"

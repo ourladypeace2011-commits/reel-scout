@@ -94,6 +94,33 @@ reel-scout analyze "<url>" --resume                # 續跑中斷的批次
 
 ---
 
+## Instagram 連結
+
+**Instagram 給你什麼形式就貼什麼形式**，兩種都吃——標準形式，以及分享按鈕實際產生的帳號形式：
+
+```
+https://www.instagram.com/reel/Da3UcDsudRN/                    # 標準
+https://www.instagram.com/zacharywinterton/reel/Da3UcDsudRN/   # 分享按鈕
+```
+
+**多數公開 reel 不需要登入。** 一次 24 支的批量實跑裡，21 支 Instagram reel 有 **20 支**完全不帶 cookies 就抓得下來；只有 **1 支**撞到登入牆，約三秒就以 `Instagram sent an empty media response` 失敗。
+
+所以請把 cookies 當成**失敗後的重試手段，不是前置條件**——先整批跑完，再回頭補那少數幾支：
+
+```bash
+# 1. 只為失敗的那幾支匯出 cookies（Chrome 或 Brave；Safari 的
+#    binarycookies 檔讀不到）
+yt-dlp --cookies-from-browser chrome --cookies /tmp/ig_cookies.txt \
+       --skip-download "https://www.instagram.com/reel/<代碼>/"
+
+# 2. 只重跑那幾支
+IG_COOKIES_FILE=/tmp/ig_cookies.txt reel-scout analyze "<網址>" --score
+```
+
+> **cookies 檔內含一份有效的 Instagram 登入工作階段。** 別放進 repo、別放進任何會同步的資料夾，重試完就刪掉。
+
+**時間預期**：Instagram reel 不管長短，成本都差不多——沒有字幕軌可讀，每一支都要在本機轉錄一次。**一支抓 3 分鐘左右**，10 秒和 70 秒的差別不大。（YouTube 相反：有附字幕的影片會直接跳過轉錄，跑起來遠比片長快。）
+
 ## 中英對照訪談（重要）
 
 whisper `large-v3` 會**用開頭那段偵測到的語言鎖定整支影片**。跑長的中英夾雜訪談（中文主持 + 英文來賓）時，它會把後面**另一種語言**的內容硬「翻譯」回鎖定的語言 —— 來賓的英文就變成一堆亂碼中文。
