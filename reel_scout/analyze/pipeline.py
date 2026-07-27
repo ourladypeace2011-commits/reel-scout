@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
-from .. import config, db
+from .. import config, db, ffprobe
 from ..crawl import get_crawler
 from ..transcribe import get_transcriber
 from ..transcribe.base import TranscriptResult
@@ -42,19 +42,11 @@ def _normalize_source(source: str) -> str:
 def _probe_duration(path: str) -> Optional[float]:
     """Best-effort duration probe. Returns None (never a fabricated fallback)
     on failure so a bad probe doesn't get written to the DB as if it were real;
-    COALESCE downstream keeps duration unset until something真的 measures it."""
-    cmd = [
-        config.FFMPEG_BIN.replace("ffmpeg", "ffprobe"),
-        "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "csv=p=0",
-        path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return float(result.stdout.strip())
-    except (ValueError, TypeError, OSError, subprocess.SubprocessError):
-        return None
+    COALESCE downstream keeps duration unset until something真的 measures it.
+
+    Thin wrapper kept so existing callers and test patches keep working; the
+    implementation is shared with the crawlers in `reel_scout.ffprobe`."""
+    return ffprobe.probe_duration(path)
 
 
 def _hash_file(path: str) -> str:

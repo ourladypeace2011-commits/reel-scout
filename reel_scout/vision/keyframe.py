@@ -245,6 +245,10 @@ def extract_keyframes(
 
 
 def _get_duration(video_path: str) -> float:
+    """Deliberately NOT `reel_scout.ffprobe.probe_duration`: a keyframe budget
+    needs *some* number to divide by, so this variant falls back to a nominal
+    60s rather than returning None and skipping extraction. The None-on-failure
+    policy is for values that get persisted; this one never leaves this module."""
     cmd = [
         config.FFMPEG_BIN.replace("ffmpeg", "ffprobe"),
         "-v", "quiet",
