@@ -275,8 +275,7 @@ def _process_single(
     # Step 2.7: Speaker diarization
     if not options.skip_diarize and config.DIARIZE_ENABLED:
         try:
-            from ..diarize import get_diarizer
-            from ..diarize.align import align_speakers_to_transcript
+            from ..diarize import get_diarizer, align_segments_json
             from ..audio.extract import extract_wav
             transcript = db.get_transcript(conn, video_id)
             if transcript and transcript["segments_json"]:
@@ -292,7 +291,10 @@ def _process_single(
                         extract_wav(file_path, wav_path)
                         diarizer = get_diarizer()
                         result = diarizer.diarize(wav_path)
-                        updated_json = align_speakers_to_transcript(
+                        # segments_json is a JSON string from the DB column, so
+                        # use the JSON-in/JSON-out wrapper (speaker-align split the
+                        # primitive into list[dict] vs *_json variants — R-mig).
+                        updated_json = align_segments_json(
                             result.segments, segments_json)
                         conn.execute(
                             "UPDATE transcripts SET segments_json=? WHERE video_id=?",

@@ -41,7 +41,10 @@ Changelog = "https://github.com/vulture-s/reel-scout/blob/master/CHANGELOG.md"
 whisper = ["faster-whisper>=1.1.0", "whisper-guard>=0.3.0"]
 audio = ["onnxruntime>=1.15.0", "numpy>=1.21.0"]
 vector = ["lancedb>=0.4.0", "chromadb>=0.4.0"]
-diarize = ["pyannote.audio>=3.1", "torch>=2.0"]
+# R-mig: diarization now lives in the speaker-align package; its [pyannote]
+# extra pulls pyannote.audio (which brings torch). speaker-align is not yet on
+# PyPI — install it editable on M2 (`pip install -e speaker-align[pyannote]`).
+diarize = ["speaker-align[pyannote]"]
 instagram = ["instaloader>=4.10"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
 dev = ["pytest>=7.0", "whisper-guard>=0.3.0"]

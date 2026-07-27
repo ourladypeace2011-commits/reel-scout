@@ -1,110 +1,66 @@
-from __future__ import annotations
+"""Tests for reel-scout's diarize ADAPTER over the speaker-align package (R-mig).
 
-import json
-from unittest.mock import MagicMock, patch
+The alignment logic, the dataclasses, and the pyannote backend now live in the
+standalone `speaker-align` package, which owns their unit tests (22 of them). So
+these tests only cover reel-scout's thin adapter: that it re-exports the surface
+and that `get_diarizer()` injects reel-scout's configured token.
+
+speaker-align is an optional (M2-local, not-yet-on-PyPI) dependency, so the whole
+module self-skips when it isn't installed — same pattern as the chromadb e2e test.
+"""
+from __future__ import annotations
 
 import pytest
 
-from reel_scout.diarize.base import (
+pytest.importorskip("speaker_align")
+
+import json  # noqa: E402
+
+from reel_scout import config  # noqa: E402
+from reel_scout import diarize  # noqa: E402
+from reel_scout.diarize import (  # noqa: E402
     BaseDiarizer,
     DiarizationResult,
     SpeakerSegment,
+    align_segments_json,
+    align_speakers_to_transcript,
+    get_diarizer,
 )
-from reel_scout.diarize.align import align_speakers_to_transcript
-from reel_scout.diarize.pyannote import PyannoteDiarizer
 
 
-# --- Dataclass tests ---
+# --- Re-export surface: existing `from ..diarize import X` callers keep working ---
+
+def test_reexports_are_speaker_align_types():
+    import speaker_align
+    assert BaseDiarizer is speaker_align.BaseDiarizer
+    assert DiarizationResult is speaker_align.DiarizationResult
+    assert SpeakerSegment is speaker_align.SpeakerSegment
+    assert align_speakers_to_transcript is speaker_align.align_speakers_to_transcript
+    assert align_segments_json is speaker_align.align_segments_json
 
 
-def test_speaker_segment_dataclass():
-    seg = SpeakerSegment(speaker="SPEAKER_00", start_sec=1.5, end_sec=3.2)
-    assert seg.speaker == "SPEAKER_00"
-    assert seg.start_sec == 1.5
-    assert seg.end_sec == 3.2
+def test_alignment_reexport_smoke():
+    # Depth lives in speaker-align's suite; here we only confirm the re-exported
+    # functions are callable through reel_scout.diarize and behave. Note the
+    # split: the primitive takes list[dict], the *_json wrapper takes a string.
+    segs = [SpeakerSegment("SPEAKER_00", 0.0, 20.0)]
+    out = align_speakers_to_transcript(segs, [{"start": 0.0, "end": 3.0, "text": "Hi"}])
+    assert out[0]["speaker"] == "SPEAKER_00"
+    # align_segments_json is what analyze/pipeline.py uses (DB stores a JSON string).
+    out_json = align_segments_json(segs, json.dumps([{"start": 0.0, "end": 3.0, "text": "Hi"}]))
+    assert json.loads(out_json)[0]["speaker"] == "SPEAKER_00"
 
 
-def test_diarization_result_dataclass():
-    segs = [
-        SpeakerSegment("SPEAKER_00", 0.0, 5.0),
-        SpeakerSegment("SPEAKER_01", 5.0, 10.0),
-    ]
-    result = DiarizationResult(segments=segs, num_speakers=2)
-    assert result.num_speakers == 2
-    assert len(result.segments) == 2
-    # Default values
-    empty = DiarizationResult()
-    assert empty.segments == []
-    assert empty.num_speakers == 0
+# --- Adapter behaviour: inject reel-scout's configured token ---
+
+def test_get_diarizer_injects_config_token(monkeypatch):
+    monkeypatch.setattr(config, "PYANNOTE_AUTH_TOKEN", "tok-123")
+    # Building a pyannote diarizer does not import pyannote (that is lazy), so
+    # this runs without the heavy dependency installed.
+    d = get_diarizer()
+    assert d._auth_token == "tok-123"
 
 
-# --- Alignment tests ---
-
-
-def test_align_single_speaker():
-    speaker_segs = [SpeakerSegment("SPEAKER_00", 0.0, 20.0)]
-    transcript = json.dumps([
-        {"start": 0.0, "end": 3.0, "text": "Hello"},
-        {"start": 3.0, "end": 6.0, "text": "world"},
-        {"start": 6.0, "end": 9.0, "text": "foo"},
-    ])
-    result = json.loads(align_speakers_to_transcript(speaker_segs, transcript))
-    for seg in result:
-        assert seg["speaker"] == "SPEAKER_00"
-
-
-def test_align_two_speakers():
-    """Speaker A at 0-5s, Speaker B at 5-10s.
-    Transcript segment 3-7s overlaps A by 2s and B by 2s.
-    But A: overlap = 5-3 = 2s, B: overlap = 7-5 = 2s — tied.
-    We pick first found (A), since loop checks > not >=.
-    Actually let's make it clearer: segment 2-6s => A overlap=3s, B overlap=1s => A wins.
-    """
-    speaker_segs = [
-        SpeakerSegment("SPEAKER_00", 0.0, 5.0),
-        SpeakerSegment("SPEAKER_01", 5.0, 10.0),
-    ]
-    transcript = json.dumps([
-        {"start": 2.0, "end": 6.0, "text": "mostly in A"},
-    ])
-    result = json.loads(align_speakers_to_transcript(speaker_segs, transcript))
-    assert result[0]["speaker"] == "SPEAKER_00"
-
-
-def test_align_no_overlap():
-    speaker_segs = [SpeakerSegment("SPEAKER_00", 20.0, 30.0)]
-    transcript = json.dumps([
-        {"start": 0.0, "end": 5.0, "text": "no overlap"},
-    ])
-    result = json.loads(align_speakers_to_transcript(speaker_segs, transcript))
-    assert result[0]["speaker"] == ""
-
-
-def test_align_empty_segments():
-    transcript = json.dumps([
-        {"start": 0.0, "end": 3.0, "text": "Hello"},
-        {"start": 3.0, "end": 6.0, "text": "world"},
-    ])
-    result = json.loads(align_speakers_to_transcript([], transcript))
-    for seg in result:
-        assert seg["speaker"] == ""
-
-
-# --- PyannoteDiarizer tests ---
-
-
-def test_pyannote_no_token_raises():
-    """PyannoteDiarizer with empty token raises ValueError on diarize()."""
-    diarizer = PyannoteDiarizer(auth_token="")
-    # Mock the import so we don't need pyannote installed
-    mock_pipeline_cls = MagicMock()
-    with patch.dict("sys.modules", {"pyannote": MagicMock(), "pyannote.audio": MagicMock(Pipeline=mock_pipeline_cls)}):
-        with pytest.raises(ValueError, match="PYANNOTE_AUTH_TOKEN"):
-            diarizer.diarize("fake.wav")
-
-
-def test_get_diarizer_unknown():
-    from reel_scout.diarize import get_diarizer
-
+def test_get_diarizer_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unknown diarization backend"):
         get_diarizer("nonexistent")
