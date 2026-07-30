@@ -265,9 +265,17 @@ def needs_completion(conn, video_id: str) -> bool:
     return described < total
 
 
+def has_score(conn, video_id: str) -> bool:
+    """True when this video already carries a score row."""
+    row = conn.execute(
+        "SELECT 1 FROM scores WHERE video_id = ? LIMIT 1", (video_id,)).fetchone()
+    return row is not None
+
+
 def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
               max_mb: str = "25", verbose: bool = False,
-              on_progress: Optional[Callable[[Dict[str, Any]], Any]] = None
+              on_progress: Optional[Callable[[Dict[str, Any]], Any]] = None,
+              score: bool = True,
               ) -> Dict[str, Any]:
     """Analyze and bundle every entry. Returns the manifest it also writes.
 
@@ -335,6 +343,19 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
         if mode == "agent" and needs_completion(conn, vid):
             pending.append(entry)
             emit("item_needs_vision", url=url, video_id=vid)
+
+        # Score before exporting, so the bundle carries the verdict. Only in
+        # `full` mode: the other modes leave the visual layer unfinished, and a
+        # score computed over a half-built analysis is worse than no score.
+        # A scorer failure is never fatal to the item -- the analysis is the
+        # expensive part and it is already safe in the database.
+        if score and mode == "full" and not has_score(conn, vid):
+            emit("item_scoring", url=url, video_id=vid)
+            if _run(self_cmd("score", vid), verbose) != 0:
+                print("    ! scoring failed -- keeping the analysis, continuing")
+                emit("item_score_failed", url=url, video_id=vid)
+            else:
+                emit("item_scored", url=url, video_id=vid)
 
         dest = os.path.join(out_root, slug)
         emit("item_exporting", url=url, video_id=vid, bundle_dir=dest)

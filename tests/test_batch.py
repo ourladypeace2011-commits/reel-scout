@@ -311,3 +311,106 @@ def test_a_bare_profile_link_is_still_left_alone():
     """Profiles are not ingestible clips; harvesting one would send the batch
     off to download a page."""
     assert batch.parse_rows("https://www.instagram.com/someuser/") == []
+
+
+# --- scoring: the batch path used to drop the craft score silently -----------
+#
+# `analyze` does not score; the documented per-URL flow is `analyze --score`.
+# The batch loop called plain `analyze` + `export`, so every reel that went
+# through `reel-scout batch` landed in the database with no verdict at all --
+# and nothing said so. These pin the step down in both directions.
+
+def _record_runs(monkeypatch, rc_for=None):
+    """Capture every sub-command run_batch shells out to."""
+    seen = []
+
+    def fake_run(cmd, verbose):
+        seen.append(cmd)
+        if rc_for:
+            for needle, rc in rc_for.items():
+                if needle in cmd:
+                    return rc
+        return 0
+
+    monkeypatch.setattr(batch, "_run", fake_run)
+    monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
+    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
+    monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
+    return seen
+
+
+def _subcommands(seen):
+    """The reel-scout subcommand of each captured invocation."""
+    out = []
+    for cmd in seen:
+        for token in cmd:
+            if token in ("analyze", "score", "export"):
+                out.append(token)
+                break
+    return out
+
+
+def test_full_mode_scores_every_item(temp_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
+    seen = _record_runs(monkeypatch)
+
+    batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full")
+
+    assert _subcommands(seen) == ["analyze", "score", "export"], (
+        "score must run, and run before export so the bundle carries the verdict")
+
+
+def test_an_already_scored_video_is_not_scored_again(temp_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: True)
+    seen = _record_runs(monkeypatch)
+
+    batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full")
+
+    assert "score" not in _subcommands(seen)
+
+
+def test_agent_mode_does_not_score_over_an_unfinished_visual_layer(
+        temp_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
+    seen = _record_runs(monkeypatch)
+
+    batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "agent")
+
+    assert "score" not in _subcommands(seen)
+
+
+def test_no_score_opts_out(temp_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
+    seen = _record_runs(monkeypatch)
+
+    batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full", score=False)
+
+    assert _subcommands(seen) == ["analyze", "export"]
+
+
+def test_a_failing_scorer_never_costs_the_analysis(temp_db, tmp_path, monkeypatch):
+    """The expensive work is already in the database; a scorer error is not fatal."""
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
+    seen = _record_runs(monkeypatch, rc_for={"score": 1})
+
+    events = []
+    result = batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full",
+                             on_progress=events.append)
+
+    assert _subcommands(seen) == ["analyze", "score", "export"]
+    assert result["done"] and result["done"][0]["video_id"] == "vid-1"
+    assert not result["failed"]
+    assert "item_score_failed" in [e["event"] for e in events]
+
+
+def test_has_score_reads_the_scores_table(temp_db):
+    import sqlite3
+    from reel_scout import db as rsdb
+
+    conn = sqlite3.connect(temp_db)
+    rsdb.init_db(conn)
+    assert batch.has_score(conn, "vid-1") is False
+    conn.execute("INSERT INTO scores (video_id, overall) VALUES (?,?)", ("vid-1", 7.0))
+    conn.commit()
+    assert batch.has_score(conn, "vid-1") is True
+    conn.close()

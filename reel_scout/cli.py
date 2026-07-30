@@ -235,6 +235,9 @@ def main(argv: List[str] = None) -> None:
     p_batch.add_argument("--limit", type=int, default=0, help="Only the first N entries")
     p_batch.add_argument("--max-mb", dest="batch_max_mb", default="25",
                          help="Skip reels whose video exceeds this (default 25)")
+    p_batch.add_argument("--no-score", dest="batch_score", action="store_false",
+                         default=True,
+                         help="Skip the scoring step (mode=full scores each reel by default)")
     p_batch.add_argument("--verbose", action="store_true", help="Echo each sub-command")
 
     # --- skill (install the agent-facing half) ---
@@ -860,7 +863,8 @@ def _cmd_batch(args) -> None:
         return
 
     result = batch.run_batch(entries, args.out, mode,
-                             max_mb=args.batch_max_mb, verbose=args.verbose)
+                             max_mb=args.batch_max_mb, verbose=args.verbose,
+                             score=getattr(args, "batch_score", True))
 
     print("\n---")
     print("%d/%d exported to %s" % (len(result["done"]), len(entries), args.out))
