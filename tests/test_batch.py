@@ -313,19 +313,38 @@ def test_a_bare_profile_link_is_still_left_alone():
     assert batch.parse_rows("https://www.instagram.com/someuser/") == []
 
 
-# --- scoring: the batch path used to drop the craft score silently -----------
+# --- scoring: deferred to one pass after the loop ------------------------------
 #
 # `analyze` does not score; the documented per-URL flow is `analyze --score`.
 # The batch loop called plain `analyze` + `export`, so every reel that went
-# through `reel-scout batch` landed in the database with no verdict at all --
-# and nothing said so. These pin the step down in both directions.
+# through `reel-scout batch` landed with no verdict at all. Scoring now runs,
+# but *after* the loop: doing it per item forces the visual model and the
+# scorer to swap in and out on every reel, measured at ~2.2x the per-item
+# cycle. These pin down both the presence and the placement.
 
-def _record_runs(monkeypatch, rc_for=None):
+def _sub_of(cmd):
+    for token in cmd:
+        if token in ("analyze", "score", "export"):
+            return token
+    return "?"
+
+
+def _subcommands(seen):
+    return [_sub_of(cmd) for cmd in seen]
+
+
+def _record_runs(monkeypatch, rc_for=None, rc_seq=None):
     """Capture every sub-command run_batch shells out to."""
     seen = []
+    calls = {}
 
     def fake_run(cmd, verbose):
         seen.append(cmd)
+        sub = _sub_of(cmd)
+        calls[sub] = calls.get(sub, 0) + 1
+        if rc_seq and sub in rc_seq:
+            seq = rc_seq[sub]
+            return seq[min(calls[sub] - 1, len(seq) - 1)]
         if rc_for:
             for needle, rc in rc_for.items():
                 if needle in cmd:
@@ -334,30 +353,26 @@ def _record_runs(monkeypatch, rc_for=None):
 
     monkeypatch.setattr(batch, "_run", fake_run)
     monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
-    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
+    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-" + url[-1])
     monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
     return seen
 
 
-def _subcommands(seen):
-    """The reel-scout subcommand of each captured invocation."""
-    out = []
-    for cmd in seen:
-        for token in cmd:
-            if token in ("analyze", "score", "export"):
-                out.append(token)
-                break
-    return out
-
-
-def test_full_mode_scores_every_item(temp_db, tmp_path, monkeypatch):
+def test_scoring_runs_once_after_the_loop_not_per_item(temp_db, tmp_path, monkeypatch):
+    """Two reels must not interleave score calls between their analyses."""
     monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
     seen = _record_runs(monkeypatch)
 
-    batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full")
+    batch.run_batch([("A", "https://x/1"), ("B", "https://x/2")],
+                    str(tmp_path / "out"), "full")
 
-    assert _subcommands(seen) == ["analyze", "score", "export"], (
-        "score must run, and run before export so the bundle carries the verdict")
+    subs = _subcommands(seen)
+    last_analyze = max(i for i, s in enumerate(subs) if s == "analyze")
+    assert subs.index("score") > last_analyze, (
+        "a score call ran before the last analyze -- that is the per-item "
+        "placement that forces a model swap on every reel")
+    assert subs.count("score") == 2
+    assert subs[-1] == "export", "bundles that gained a verdict are refreshed after"
 
 
 def test_an_already_scored_video_is_not_scored_again(temp_db, tmp_path, monkeypatch):
@@ -388,6 +403,21 @@ def test_no_score_opts_out(temp_db, tmp_path, monkeypatch):
     assert _subcommands(seen) == ["analyze", "export"]
 
 
+def test_a_timed_out_score_is_retried_once(temp_db, tmp_path, monkeypatch):
+    """The first score after a batch of VLM work pays the model load; retry it."""
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
+    seen = _record_runs(monkeypatch, rc_seq={"score": [1, 0]})
+
+    events = []
+    result = batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full",
+                             on_progress=events.append)
+
+    assert _subcommands(seen).count("score") == 2, "a failed score must be retried once"
+    kinds = [e["event"] for e in events]
+    assert "item_scored" in kinds and "item_score_failed" not in kinds
+    assert result["done"] and not result["failed"]
+
+
 def test_a_failing_scorer_never_costs_the_analysis(temp_db, tmp_path, monkeypatch):
     """The expensive work is already in the database; a scorer error is not fatal."""
     monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
@@ -397,7 +427,7 @@ def test_a_failing_scorer_never_costs_the_analysis(temp_db, tmp_path, monkeypatc
     result = batch.run_batch([("A", "https://x/1")], str(tmp_path / "out"), "full",
                              on_progress=events.append)
 
-    assert _subcommands(seen) == ["analyze", "score", "export"]
+    assert _subcommands(seen).count("score") == 2, "failed twice = tried and retried"
     assert result["done"] and result["done"][0]["video_id"] == "vid-1"
     assert not result["failed"]
     assert "item_score_failed" in [e["event"] for e in events]

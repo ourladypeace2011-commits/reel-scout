@@ -344,19 +344,6 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
             pending.append(entry)
             emit("item_needs_vision", url=url, video_id=vid)
 
-        # Score before exporting, so the bundle carries the verdict. Only in
-        # `full` mode: the other modes leave the visual layer unfinished, and a
-        # score computed over a half-built analysis is worse than no score.
-        # A scorer failure is never fatal to the item -- the analysis is the
-        # expensive part and it is already safe in the database.
-        if score and mode == "full" and not has_score(conn, vid):
-            emit("item_scoring", url=url, video_id=vid)
-            if _run(self_cmd("score", vid), verbose) != 0:
-                print("    ! scoring failed -- keeping the analysis, continuing")
-                emit("item_score_failed", url=url, video_id=vid)
-            else:
-                emit("item_scored", url=url, video_id=vid)
-
         dest = os.path.join(out_root, slug)
         emit("item_exporting", url=url, video_id=vid, bundle_dir=dest)
         if _run(self_cmd("export", "--format", "bundle", "--video", vid,
@@ -370,6 +357,48 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
         done.append(entry)
         print("    ok %s" % dest)
         emit("item_done", url=url, label=label, video_id=vid, bundle_dir=dest)
+
+    # --- scoring pass -------------------------------------------------------
+    #
+    # Deliberately *after* the loop rather than inside it. Scoring uses a
+    # different (larger) model than the visual layer, and on a machine that
+    # cannot hold both resident every per-item score forces the pair to be
+    # swapped out and back in — measured at ~2.2x the per-item cycle over a
+    # 9-reel batch, while the scoring inference itself is 7-10 seconds. Run
+    # once at the end and the scorer loads once for the whole batch.
+    #
+    # The retry is not defensive padding: the first call after a batch of VLM
+    # work is the one that pays the model load, and that is exactly the call
+    # observed hitting the backend's timeout. The same reel scored in under two
+    # minutes once the model was warm.
+    if score and mode == "full" and not cancelled:
+        todo = [e for e in done if not has_score(conn, e["video_id"])]
+        if todo:
+            print("\nScoring %d reel(s)..." % len(todo))
+            emit("scoring_pass_start", count=len(todo))
+            rescored = []
+            for e in todo:
+                emit("item_scoring", url=e["url"], video_id=e["video_id"])
+                ok = _run(self_cmd("score", e["video_id"]), verbose) == 0
+                if not ok:
+                    print("    ... scoring %s timed out or failed, retrying once"
+                          % (e["label"] or e["slug"]))
+                    ok = _run(self_cmd("score", e["video_id"]), verbose) == 0
+                if ok:
+                    rescored.append(e)
+                    emit("item_scored", url=e["url"], video_id=e["video_id"])
+                else:
+                    # The analysis is the expensive part and it is already safe
+                    # in the database; a missing verdict is recoverable with
+                    # `reel-scout score <id>` later.
+                    print("    ! scoring failed for %s -- keeping the analysis"
+                          % (e["label"] or e["slug"]))
+                    emit("item_score_failed", url=e["url"], video_id=e["video_id"])
+            # The bundles were written before the verdict existed, so refresh
+            # exactly the ones that gained a score.
+            for e in rescored:
+                _run(self_cmd("export", "--format", "bundle", "--video", e["video_id"],
+                              "-o", e["bundle_dir"], "--max-mb", str(max_mb)), verbose)
 
     conn.close()
     result = {"mode": mode, "done": done, "failed": failed, "pending_completion": pending}
