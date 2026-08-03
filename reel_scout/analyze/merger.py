@@ -32,9 +32,7 @@ _MERGE_PROMPT_TEMPLATE = """You are analyzing a short-form video. Based on the t
   "summary": "1-2 sentence summary of the video content",
   "topics": ["topic1", "topic2"],
   "timeline": [
-    {{"timestamp": "0-3s", "event": "hook/opening description"}},
-    {{"timestamp": "3-15s", "event": "main content description"}},
-    {{"timestamp": "15-20s", "event": "CTA or closing"}}
+    {{"timestamp": "<start>-<end>s", "event": "<what actually happens in this segment, specific to this video>"}}
   ],
   "hook": {{
     "opening_type": "question|statement|visual|music|none",
@@ -73,6 +71,42 @@ IMPORTANT — cta_type: read the LAST transcript segments and final frames befor
 The timeline should capture the narrative arc: how the video progresses from hook to main content to conclusion/CTA. Use approximate time ranges.
 
 Return ONLY valid JSON, no explanation."""
+
+
+#: Event strings the schema block used to carry as a worked example. The model
+#: copied them back verbatim for 94 of the first 96 clips analyzed -- it adapted
+#: the timestamps but not the prose, because unlike every other field in that
+#: block ("question|statement|visual|...", "1-2 sentence summary of...") these
+#: read like plausible values rather than a specification. Changing the example
+#: to a specification is the fix; this list is the tripwire that proves it held.
+_TIMELINE_TEMPLATE_EVENTS = frozenset({
+    "hook/opening description",
+    "main content description",
+    "cta or closing",
+})
+
+
+def strip_template_timeline(timeline):
+    """Drop timeline entries whose event is the schema example echoed back.
+
+    Returns (kept, dropped_count). An echoed entry is worse than a missing one:
+    `scorer.py` names the timeline as evidence for BOTH `hook_strength`
+    ("signal: timeline 0-3s") and `structure` ("signal: timeline narrative
+    arc"), so a constant masquerading as analysis scores every clip against the
+    same invented three-beat arc -- and the viewer renders it to the reader as
+    if it were a finding.
+    """
+    if not isinstance(timeline, list):
+        return [], 0
+    kept = []
+    dropped = 0
+    for item in timeline:
+        if isinstance(item, dict) and \
+                (item.get("event") or "").strip().lower() in _TIMELINE_TEMPLATE_EVENTS:
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
 
 
 _MEASURED_FIELDS = ("cuts_per_minute", "shot_count", "avg_shot_sec",
@@ -204,6 +238,15 @@ def merge_analysis(
             data = json.loads(m.group())
         else:
             data = {"summary": result_json, "topics": [], "error": "failed to parse JSON"}
+
+    # Refuse to store the schema example as if it were analysis. Silently
+    # keeping it is what let a constant sit in 94 of 96 clips for seven weeks
+    # while two score dimensions cited it as evidence.
+    _tl, _dropped = strip_template_timeline(data.get("timeline"))
+    if _dropped:
+        data["timeline"] = _tl
+        print("    ! dropped %d template timeline entr%s (model echoed the "
+              "schema example)" % (_dropped, "y" if _dropped == 1 else "ies"))
 
     # §4E: fold measured pacing signals (cuts/min, shot count, audio energy/BPM)
     # into the analysis blob so the scorer reasons on evidence, not LLM vibes.
