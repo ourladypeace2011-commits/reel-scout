@@ -4,6 +4,7 @@ from __future__ import annotations
 import array
 import json
 import os
+import re
 import sqlite3
 import threading
 import urllib.request
@@ -419,3 +420,86 @@ def test_i18n_chrome_translated_but_model_content_untouched(temp_db):
 def test_i18n_dicts_have_identical_keys():
     """en and zh must cover the same keys, or a switch leaves stale text behind."""
     assert set(inspector.I18N["en"]) == set(inspector.I18N["zh"])
+
+
+# --- evidence: the header must not name a language nobody spoke ----------------
+#
+# Whisper reports a language even when it transcribed nothing: 22 of the 34
+# silent clips in the live corpus are labelled `nn` (Norwegian Nynorsk), its
+# classic output on silence. The header said `instagram / @x / nn / 0:32` for a
+# clip with zero words, which reads as "we heard Norwegian", not "we heard
+# nothing".
+
+def test_empty_transcript_gets_a_note_not_a_missing_section(temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, segments=[], text_full="")
+        page = inspector.render_inspector(inspector.build_inspect_view(conn, vid))
+    finally:
+        conn.close()
+    assert 'data-i18n="noTranscript"' in page
+    assert 'data-i18n="noTranscriptNote"' in page
+    assert 'class="segs"' not in page
+
+
+def test_language_chip_is_hidden_when_no_words_were_transcribed(temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, segments=[], text_full="")
+        page = inspector.render_inspector(inspector.build_inspect_view(conn, vid))
+    finally:
+        conn.close()
+    # Scope to the meta line AND match the separator: a bare "en" false-positives
+    # on the `rel="noopener"` sitting in the same element.
+    meta = re.search(r'<p class="meta">.*?</p>', page, re.S)
+    assert meta is not None
+    assert " / en" not in meta.group(0)
+
+
+def test_language_chip_still_shows_when_there_are_words(temp_db):
+    """Negative control for the guard above."""
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn)
+        page = inspector.render_inspector(inspector.build_inspect_view(conn, vid))
+    finally:
+        conn.close()
+    meta = re.search(r'<p class="meta">.*?</p>', page, re.S)
+    assert meta is not None and " / en" in meta.group(0)
+
+
+def test_the_score_block_is_unchanged_when_the_transcript_is_empty(temp_db):
+    """The owner's call was label-only: say the evidence was thin, never quietly
+    withhold or discount the number. This encodes that so a later contributor
+    cannot decide to be clever and grey it out."""
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, segments=[], text_full="", with_score=True)
+        page = inspector.render_inspector(inspector.build_inspect_view(conn, vid))
+    finally:
+        conn.close()
+    for key in ("dim.overall", "dim.hook_strength", "dim.visual_storytelling",
+                "dim.pacing", "dim.structure"):
+        assert 'data-i18n="%s"' % key in page
+    meters = re.search(r'<div class="meters">.*?</div>\s*</section>', page, re.S)
+    if meters:
+        assert "noTranscriptNote" not in meters.group(0)
+
+
+def test_segments_win_over_an_empty_text_full(temp_db):
+    """Defensive: never render segments and a 'no transcript' note together."""
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, segments=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+                    text_full="")
+        view = inspector.build_inspect_view(conn, vid)
+        page = inspector.render_inspector(view)
+    finally:
+        conn.close()
+    assert view["has_transcript"] is True
+    assert 'data-i18n="noTranscriptNote"' not in page

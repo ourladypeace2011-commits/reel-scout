@@ -599,9 +599,17 @@ def _cmd_show(args) -> None:
     print(f"Duration: {video['duration_sec']}s")
     print(f"Status: {video['status']}")
 
-    if transcript:
+    # A silent clip used to print the header and then nothing -- and the header
+    # named a language, which for most of these is Whisper's guess at silence.
+    # Say there are no words instead of implying some were heard.
+    words = (transcript["text_full"] or "").strip() if transcript else ""
+    if words:
         print(f"\n--- Transcript ({transcript['language']}) ---")
-        print(transcript["text_full"][:500])
+        print(words[:500])
+    else:
+        print("\n--- Transcript ---")
+        print("(no transcript — music-only / no narration; the score draws on "
+              "the visual layer and the measured rhythm alone)")
 
     # Keyframes are listed with their ids because that is the only way to address
     # a specific frame from outside (`ingest vision --from-json`), and an agent

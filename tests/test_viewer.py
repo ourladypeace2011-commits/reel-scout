@@ -8,7 +8,7 @@ import struct
 import tempfile
 import zlib
 
-from reel_scout import config, db, viewer
+from reel_scout import config, db, i18n, viewer
 from reel_scout.export.json_export import export_html
 
 
@@ -34,13 +34,13 @@ _FULL = {
 }
 
 
-def _seed(conn, kf_path=None):
+def _seed(conn, kf_path=None, text_full="Hungry? Come try our chicken.", platform_id="abc"):
     # Order mirrors the real pipeline (transcribe/keyframes first, merge last) so
     # the final video status is "analyzed" — save_transcript sets "transcribed".
-    vid = db.upsert_video(conn, platform="youtube", platform_id="abc",
-                          url="https://youtube.com/shorts/abc", title="Fried Chicken",
+    vid = db.upsert_video(conn, platform="youtube", platform_id=platform_id,
+                          url="https://youtube.com/shorts/%s" % platform_id, title="Fried Chicken",
                           uploader="Waffle", duration_sec=20.0)
-    db.save_transcript(conn, vid, language="en", text_full="Hungry? Come try our chicken.",
+    db.save_transcript(conn, vid, language="en", text_full=text_full,
                        segments_json="[]", whisper_model="x", duration_sec=20.0)
     conn.execute("INSERT INTO scores (video_id, hook_strength, visual_storytelling, "
                  "pacing, structure, overall) VALUES (?,?,?,?,?,?)", (vid, 8.0, 7.0, 9.0, 6.5, 7.6))
@@ -262,3 +262,105 @@ def test_viewer_and_inspector_share_one_i18n_dict():
     from reel_scout import i18n, inspector
     assert inspector.I18N is i18n.STRINGS
     assert set(i18n.STRINGS["en"]) == set(i18n.STRINGS["zh"])
+
+
+# --- evidence: a score computed without a transcript must say so ---------------
+#
+# 36% of the live corpus (35 of 96 clips) has no usable transcript, and 32 of
+# those still carry a four-dimension craft score. Every surface used to collapse
+# "no words" into an empty string and then render nothing, so a score built on
+# the visual layer alone was typographically identical to one built on
+# everything. Mean overall for the two groups is 6.82 vs 6.88 -- the scorer is
+# demonstrably not discounting, which is why the reader has to be told.
+
+def _seed_no_row(conn):
+    """A clip whose transcripts row was never written at all."""
+    vid = db.upsert_video(conn, platform="instagram", platform_id="silent",
+                          url="https://instagram.com/reel/silent/", title="Silent",
+                          uploader="nobody", duration_sec=9.0)
+    db.save_analysis(conn, vid, summary="", topics_json="[]", hooks_json="{}",
+                     style_json="{}", engagement_signals_json="{}", full_json="{}")
+    conn.commit()
+    return vid
+
+
+def test_build_video_view_flags_a_clip_with_no_words(temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        spoken = _seed(conn)
+        silent = _seed(conn, text_full="", platform_id="quiet")
+        norow = _seed_no_row(conn)
+        assert viewer.build_video_view(conn, spoken)["has_transcript"] is True
+        assert viewer.build_video_view(conn, silent)["has_transcript"] is False
+        # A missing row and an empty row mean the same thing to a reader.
+        assert viewer.build_video_view(conn, norow)["has_transcript"] is False
+    finally:
+        conn.close()
+
+
+def test_whitespace_only_transcript_counts_as_no_words(temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, text_full="   \n  ")
+        assert viewer.build_video_view(conn, vid)["has_transcript"] is False
+    finally:
+        conn.close()
+
+
+def test_index_row_marks_only_the_clip_with_no_transcript(temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        spoken = _seed(conn)
+        silent = _seed(conn, text_full="", platform_id="quiet")
+        views = [viewer.build_video_view(conn, spoken),
+                 viewer.build_video_view(conn, silent)]
+        page = viewer.render_index(views, href=lambda v: "/inspect/%s" % v)
+    finally:
+        conn.close()
+    assert page.count('data-i18n="noTranscript"') == 1
+
+
+def test_video_section_says_no_transcript_instead_of_rendering_nothing(temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, text_full="")
+        page = viewer.render_video_section(viewer.build_video_view(conn, vid),
+                                           keyframe_src=lambda kf: "")
+    finally:
+        conn.close()
+    assert 'data-i18n="noTranscript"' in page
+    assert 'data-i18n="noTranscriptNote"' in page
+    # The score still renders -- this labels evidence, it never withholds.
+    assert "7.6" in page
+
+
+def test_a_transcribed_clip_gets_no_marker(temp_db):
+    """Negative control: the marker must not appear where words exist."""
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn)
+        page = viewer.render_video_section(viewer.build_video_view(conn, vid),
+                                           keyframe_src=lambda kf: "")
+    finally:
+        conn.close()
+    assert 'data-i18n="noTranscriptNote"' not in page
+    assert 'data-i18n="transcript"' in page
+
+
+def test_the_rendered_baseline_matches_the_english_dict(temp_db):
+    """applyLang() swaps textContent wholesale, so a drifted English baseline
+    would flip to different words the first time someone toggles language."""
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, text_full="")
+        page = viewer.render_video_section(viewer.build_video_view(conn, vid),
+                                           keyframe_src=lambda kf: "")
+    finally:
+        conn.close()
+    assert i18n.STRINGS["en"]["noTranscriptNote"] in page

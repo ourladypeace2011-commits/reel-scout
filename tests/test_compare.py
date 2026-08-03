@@ -130,3 +130,51 @@ def test_format_table_renders_fields_and_errors():
     finally:
         conn.close()
         os.unlink(path)
+
+
+# --- evidence: the comparison table is where numbers become verdicts ----------
+#
+# This table puts five score dimensions side by side and, until now, never once
+# looked at whether either clip had words to score. It is the surface most
+# likely to turn "6.8 vs 7.2" into "B is better", which is exactly the reading
+# the project's honesty line exists to prevent.
+
+def test_comparison_marks_a_clip_scored_without_a_transcript():
+    conn, path = _temp_db()
+    try:
+        spoken = _seed_video(conn, "spoken", title="Spoken", duration=20.0,
+                             full={"summary": "s"}, score=(8.0, 7.0, 9.0, 6.5, 7.6))
+        db.save_transcript(conn, spoken, language="en", text_full="Real words here.",
+                           segments_json="[]", whisper_model="x", duration_sec=20.0)
+        silent = _seed_video(conn, "silent", title="Silent", duration=9.0,
+                             full={"summary": "s"}, score=(7.0, 8.0, 6.0, 7.0, 7.0))
+        db.save_transcript(conn, silent, language="nn", text_full="",
+                           segments_json="[]", whisper_model="x", duration_sec=9.0)
+        conn.commit()
+
+        assert compare.collect_video(conn, spoken)["has_transcript"] is True
+        assert compare.collect_video(conn, silent)["has_transcript"] is False
+
+        table = compare.format_table(
+            {"videos": [compare.collect_video(conn, spoken),
+                        compare.collect_video(conn, silent)], "errors": []})
+    finally:
+        conn.close()
+        os.unlink(path)
+
+    assert "Transcript" in table
+    assert "NO WORDS" in table
+    # An em dash means "unknown" everywhere else in this table; a clip we looked
+    # at and found silent is a finding, not an unknown.
+    assert "yes" in table
+
+
+def test_a_clip_with_no_transcript_row_reads_as_no_words():
+    conn, path = _temp_db()
+    try:
+        vid = _seed_video(conn, "norow", title="No row", duration=5.0,
+                          full={"summary": "s"}, score=(7.0, 7.0, 7.0, 7.0, 7.0))
+        assert compare.collect_video(conn, vid)["has_transcript"] is False
+    finally:
+        conn.close()
+        os.unlink(path)

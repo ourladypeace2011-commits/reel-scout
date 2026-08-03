@@ -22,6 +22,10 @@ FIELDS: List[Tuple[str, str]] = [
     ("opening_type", "Hook type"),
     ("cta_type", "CTA type"),
     ("content_type", "Content type"),
+    # Directly above the scores on purpose: this table is where a reader is most
+    # likely to turn two numbers into "A is better than B", and until now it
+    # never once looked at whether either clip had words to score.
+    ("has_transcript", "Transcript"),
     ("hook_strength", "Hook score"),
     ("visual_storytelling", "Visual score"),
     ("pacing_score", "Pacing score"),
@@ -52,6 +56,7 @@ def collect_video(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
     video = db.get_video(conn, video_id)
     analysis = db.get_analysis(conn, video_id)
     score = db.get_score(conn, video_id)
+    transcript = db.get_transcript(conn, video_id)
 
     row: Dict[str, Any] = {
         "video_id": video_id,
@@ -63,6 +68,10 @@ def collect_video(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
         "opening_type": None,
         "cta_type": None,
         "content_type": None,
+        "has_transcript": (
+            bool((transcript["text_full"] or "").strip())
+            if transcript is not None else False
+        ),
         "hook_strength": None,
         "visual_storytelling": None,
         "pacing_score": None,
@@ -114,6 +123,12 @@ def build_comparison(
 
 
 def _fmt(key: str, value: Any) -> str:
+    # Checked before the None/"" fold: False here means "we looked, there were
+    # no words", which is a finding. _MISSING means "unknown" everywhere else in
+    # this table, and collapsing the two would erase the distinction the column
+    # exists to draw.
+    if key == "has_transcript":
+        return "yes" if value else "NO WORDS"
     if value is None or value == "":
         return _MISSING
     if key == "duration_sec":
