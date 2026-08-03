@@ -90,6 +90,9 @@ def export_json(
             "duration_sec": video["duration_sec"],
             "upload_date": video["upload_date"],
             "transcript": transcript["text_full"] if transcript else None,
+            "has_transcript": (
+                bool((transcript["text_full"] or "").strip()) if transcript else False
+            ),
             "language": transcript["language"] if transcript else None,
             # R-seg: keep the timecoded (and, when diarized, speaker-tagged)
             # segments, not just the flat text_full — so a JSON consumer can locate

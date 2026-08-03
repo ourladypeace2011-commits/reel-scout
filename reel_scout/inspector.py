@@ -128,6 +128,11 @@ def build_inspect_view(conn: db.sqlite3.Connection, video_id: str) -> Optional[D
     view["duration"] = duration
     view["file_path"] = file_path
     view["has_video"] = resolve_video_file(file_path) is not None
+    # Belt and braces: no row in the corpus today has segments with an empty
+    # text_full, but if one ever did the page would otherwise render the
+    # segments AND a note saying there is no transcript, side by side.
+    if segments:
+        view["has_transcript"] = True
     return view
 
 
@@ -319,7 +324,11 @@ def render_inspector(view: Dict[str, Any], base: str = "",
     meta_bits = [_e(view["platform"])]
     if view.get("uploader"):
         meta_bits.append("@%s" % _e(view["uploader"]))
-    if view.get("language"):
+    # Whisper reports a language even when it transcribed nothing, so a
+    # music-only reel used to be labelled `en` in the header while the
+    # transcript panel below said there was no speech. Show it only when there
+    # are words for it to describe.
+    if view.get("language") and view.get("has_transcript"):
         meta_bits.append(_e(view["language"]))
     meta_bits.append(_fmt_ts(dur))
     meta = " / ".join(meta_bits)
@@ -380,7 +389,14 @@ def render_inspector(view: Dict[str, Any], base: str = "",
                       '<div class="flat">%s</div></section>'
                       % (_t("transcript", "Transcript"), _e(view["transcript"])))
     else:
-        transcript = ''
+        # Rendering nothing here is what made a music-only reel indistinguishable
+        # from one whose transcription simply never ran -- and the craft score
+        # above says nothing either way. Say it plainly instead: the score is
+        # still shown, it just rests on the visual layer alone.
+        transcript = ('<section class="block"><div class="eyebrow">%s</div>'
+                      '<div class="flat empty" data-i18n="noTranscriptNote">%s</div>'
+                      '</section>'
+                      % (_t("noTranscript"), _e(I18N["en"]["noTranscriptNote"])))
 
     summary = ('<p class="summary">%s</p>' % _e(view["summary"])) if view.get("summary") else ""
 
@@ -719,6 +735,7 @@ a{color:inherit}
 .seg .tc{flex:0 0 2.8rem;color:var(--quiet);font-family:var(--mono);font-size:11px}
 .flat{white-space:pre-wrap;color:var(--ink-2);font-size:13px;max-height:44vh;overflow:auto;
   padding:12px;border:1px solid var(--rule-soft)}
+.flat.empty{color:var(--quiet)}
 /* scores — mono bars; status colours are a data layer, never brand chrome */
 .meters{display:flex;flex-direction:column;gap:6px;max-width:440px}
 .meter{display:flex;align-items:center;gap:12px}

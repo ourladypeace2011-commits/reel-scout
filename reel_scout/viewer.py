@@ -91,8 +91,25 @@ def build_video_view(conn: db.sqlite3.Connection, video_id: str) -> Optional[Dic
         "timeline": full.get("timeline", []) or [],
         "score": dict(score) if score is not None else None,
         "transcript": transcript["text_full"] if transcript is not None else "",
+        # A clip with no speech is not the same as a clip nobody transcribed,
+        # and neither is the same as a clip whose words are simply short. Every
+        # surface below used to collapse all three into an empty string and then
+        # render nothing at all -- so a craft score computed with the transcript
+        # missing looked exactly like one computed with it present. Carry the
+        # fact explicitly instead. Computed here rather than persisted because
+        # the rows that need it most are the ones already in the database.
+        "has_transcript": (
+            bool((transcript["text_full"] or "").strip())
+            if transcript is not None else False
+        ),
         "keyframes": [dict(k) for k in keyframes],
     }
+
+
+#: English baseline for the empty-transcript note. Must match i18n.STRINGS["en"]
+#: ["noTranscriptNote"] -- applyLang() replaces textContent, so a drifted
+#: baseline would silently flip back to the wrong words on a language toggle.
+NO_TRANSCRIPT_EN = i18n.STRINGS["en"]["noTranscriptNote"]
 
 
 def _e(value: Any) -> str:
@@ -182,10 +199,14 @@ def render_video_section(view: Dict[str, Any], keyframe_src: KeyframeSrc) -> str
                               % _e(text)) if text else ''))
         parts.append('</div>')
 
-    # Transcript.
+    # Transcript. An empty one is stated, not skipped -- see build_video_view.
     if view["transcript"]:
         parts.append('<h3 data-i18n="transcript">Transcript</h3>'
                      '<div class="transcript">%s</div>' % _e(view["transcript"]))
+    else:
+        parts.append('<h3 data-i18n="noTranscript">\u26a0 no transcript</h3>'
+                     '<p class="transcript empty" data-i18n="noTranscriptNote">%s</p>'
+                     % _e(NO_TRANSCRIPT_EN))
 
     parts.append('</section>')
     return "\n".join(parts)
@@ -204,6 +225,8 @@ nav.index a{display:flex;align-items:baseline;gap:10px;padding:11px 2px;
 nav.index a:hover{background:var(--surface)}
 nav.index a:hover .ttl{text-decoration:underline;text-underline-offset:3px}
 nav.index .ttl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+nav.index .sc.warn{color:var(--ink-2)}
+.transcript.empty{color:var(--quiet);background:none;border-style:dashed}
 nav.index .sc{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--quiet);flex:none}
 
@@ -272,8 +295,13 @@ def render_index(views: List[Dict[str, Any]], href: Callable[[str], str]) -> str
         if v["score"] and v["score"].get("overall") is not None:
             overall = '<span class="sc"> · %.1f</span>' % v["score"]["overall"]
         struct = '<span class="sc"> · %s</span>' % _e(v["content_structure"]) if v["content_structure"] else ""
-        items.append('<a href="%s"><span class="ttl">%s</span>%s%s</a>' % (
-            _e(href(v["video_id"])), _e(v["title"]), struct, overall))
+        # The score chip sits right here, so the caveat belongs beside it: a
+        # reader comparing two rows should be able to see that one of the
+        # numbers had less to work with.
+        notx = ('<span class="sc warn"> · <span data-i18n="noTranscript">'
+                '\u26a0 no transcript</span></span>') if not v.get("has_transcript") else ""
+        items.append('<a href="%s"><span class="ttl">%s</span>%s%s%s</a>' % (
+            _e(href(v["video_id"])), _e(v["title"]), struct, overall, notx))
     items.append('</nav>')
     return "\n".join(items)
 

@@ -31,6 +31,13 @@ STRINGS = {
         "seek": "click to seek",
         "described": "described",
         "transcript": "Transcript",
+        # The glyph lives INSIDE the string, in both dicts: applyLang() swaps a
+        # node's whole textContent, so anything parked outside the span would
+        # survive one toggle and vanish on the next.
+        "noTranscript": "\u26a0 no transcript",
+        "noTranscriptNote": ("No transcript for this clip (music-only / no narration) "
+                             "\u2014 the score draws on the visual layer and the "
+                             "measured rhythm alone."),
         "craftScores": "Craft scores",
         "refNotAuthority": "reference, not authority",
         "reweightSummary": "Re-weight — see how much the verdict depends on what you value",
@@ -89,6 +96,8 @@ STRINGS = {
         "seek": "點擊跳轉",
         "described": "有描述",
         "transcript": "逐字稿",
+        "noTranscript": "\u26a0 無逐字稿",
+        "noTranscriptNote": "這支沒有逐字稿（純音樂／無旁白），評分只依據畫面與節奏測量。",
         "craftScores": "工藝評分",
         "refNotAuthority": "參考，非定論",
         "reweightSummary": "重新加權 — 看評分有多取決於你重視什麼",

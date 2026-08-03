@@ -15,7 +15,7 @@ def _tiny_jpeg(path):
         f.write(b"\xff\xd8\xff\xdb" + b"\x00" * 32 + b"\xff\xd9")
 
 
-def _seed(conn, video_bytes=b"\x00\x01\x02\x03", title="Reel One"):
+def _seed(conn, video_bytes=b"\x00\x01\x02\x03", title="Reel One", text_full="測試逐字稿", segments_json=None):
     vid = db.upsert_video(
         conn, platform="youtube", platform_id="bundle1",
         url="https://youtube.com/shorts/bundle1", title=title, duration_sec=12.0,
@@ -30,9 +30,10 @@ def _seed(conn, video_bytes=b"\x00\x01\x02\x03", title="Reel One"):
     _tiny_jpeg(kf)
     db.save_keyframes(conn, vid, [{"frame_index": 0, "timestamp_sec": 1.0,
                                    "file_path": kf, "strategy": "scene"}])
-    db.save_transcript(conn, vid, language="zh", text_full="測試逐字稿",
-                       segments_json=json.dumps([{"start": 0.0, "end": 2.0,
-                                                  "text": "測試逐字稿"}]),
+    db.save_transcript(conn, vid, language="zh", text_full=text_full,
+                       segments_json=(segments_json if segments_json is not None
+                                      else json.dumps([{"start": 0.0, "end": 2.0,
+                                                        "text": "測試逐字稿"}])),
                        whisper_model="test", duration_sec=12.0)
     db.save_analysis(conn, vid, summary="摘要", topics_json='["a"]', hooks_json="{}",
                      style_json="{}", engagement_signals_json="{}",
@@ -120,3 +121,18 @@ def test_bundle_pages_link_back_to_index(temp_db):
     assert 'class="back" href="index.html"' in with_back["html"]
     # a standalone page gets no dangling link
     assert 'class="back"' not in without["html"]
+
+
+def test_a_silent_reel_page_still_says_why(temp_db):
+    """The bundle is the artifact a student keeps after the course -- the one
+    file nobody can correct in person later. It inherits the inspector renderer,
+    so this test exists to prove that inheritance actually holds."""
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        vid = _seed(conn, text_full="", segments_json="[]")
+        page = bundle.build_reel_page(conn, vid)
+    finally:
+        conn.close()
+    assert page["ok"] is True
+    assert 'data-i18n="noTranscriptNote"' in page["html"]
