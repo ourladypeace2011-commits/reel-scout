@@ -1,4 +1,4 @@
-"""Read-only viewer for decoded analyses.
+"""Viewer for decoded analyses.
 
 Renders a video's reverse-decoded structure (hook / beats / CTA), keyframes,
 craft scores, and transcript as HTML. Two surfaces share this one renderer:
@@ -8,9 +8,12 @@ craft scores, and transcript as HTML. Two surfaces share this one renderer:
     artifact for course students; and
   * a local `reel-scout view` server (keyframes served from disk).
 
-Deliberately READ-ONLY: it shows the decoded craft, it never offers an action
-(no edit / re-analyze / run buttons). Scores are labelled a reference, not an
-authority, per the project's honesty line.
+The ANALYSIS is read-only on both: neither surface offers to edit, re-analyze or
+re-run anything, and scores stay labelled a reference rather than an authority.
+The served library list is the one exception, and only for the operator's OWN
+layer — star, group and note (see `annotate`). Those write to their own tables
+and change nothing the model produced. The export has no server to write to and
+stays entirely read-only, annotations included.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ import json
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-from . import config, db, i18n, theme
+from . import annotate, config, db, i18n, theme
 
 # A keyframe-src strategy maps a keyframe row → the string that goes in <img src>.
 # Export uses a base64 data URI (self-contained); the server uses a URL.
@@ -259,16 +262,60 @@ figcaption{font-size:13px;color:var(--ink-2);margin-top:.4rem;line-height:1.45}
   max-width:var(--col)}
 .topics{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--quiet)}
+
+/* --- served library table (annotations) --- */
+table.library{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:1rem}
+table.library th{text-align:left;font-family:var(--mono);font-size:10px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--quiet);
+  font-weight:400;padding:6px 10px;border-bottom:1px solid var(--rule)}
+table.library td{padding:7px 10px;border-bottom:1px solid var(--rule-soft);
+  vertical-align:middle}
+table.library tr:hover td{background:var(--surface)}
+table.library .c-star{width:2.4rem;text-align:center;padding-left:4px;padding-right:4px}
+table.library .c-score{width:4rem;text-align:right;font-family:var(--mono);
+  font-size:12px;color:var(--ink-2)}
+table.library .c-group{width:11rem}
+table.library .c-note{width:38%}
+table.library .c-title a{color:var(--ink);text-decoration:none;font-weight:500}
+table.library .c-title a:hover{text-decoration:underline}
+table.library .c-title .sc{font-family:var(--mono);font-size:10px;color:var(--quiet);
+  letter-spacing:.08em;margin-left:.5rem}
+table.library .c-title .sc.warn{color:var(--warn,#b45309)}
+.starbtn{background:none;border:0;cursor:pointer;padding:2px 4px;line-height:1;
+  color:var(--quiet);font-size:16px}
+.starbtn:hover{color:var(--ink)}
+.starbtn[aria-pressed="true"]{color:var(--accent,#c2871a)}
+.starbtn.hdr{font-size:13px}
+select.groupsel,input.noteinput,#newgroup{font-family:inherit;font-size:13px;
+  color:var(--ink);background:var(--bg);border:1px solid var(--rule-soft);
+  border-radius:3px;padding:3px 6px;width:100%}
+input.noteinput::placeholder,#newgroup::placeholder{color:var(--quiet);opacity:.7}
+select.groupsel:focus,input.noteinput:focus,#newgroup:focus{outline:0;
+  border-color:var(--ink-2)}
+.libtools{display:flex;align-items:center;gap:8px;margin:0 0 1rem;
+  font-family:var(--mono);font-size:11px;flex-wrap:wrap}
+.libtools #newgroup{width:14rem}
+.libtools button{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;padding:5px 10px;border:1px solid var(--rule-soft);
+  background:none;color:var(--quiet);cursor:pointer;border-radius:3px}
+.libtools button:hover{color:var(--ink);border-color:var(--ink-2)}
+.savehint{color:var(--quiet);letter-spacing:.08em}
+.savehint.bad{color:var(--warn,#b45309)}
 """
 
 _STYLE = theme.stylesheet(_COMPONENTS)
 
 
 def render_page(sections: List[str], index_html: str, title: str,
-                embed_fonts: bool = False) -> str:
+                embed_fonts: bool = False, extra_js: str = "",
+                sub_key: str = "sub") -> str:
     # Server pages link the fonts (/font/...); the take-home export inlines
     # them so the file still looks right offline and after being moved.
     style = theme.stylesheet(_COMPONENTS, embed_fonts=embed_fonts) + i18n.TOGGLE_CSS
+    # `sub_key` is how the export stays honest: the take-home file really is
+    # read-only, while the served library now writes annotations back, and the
+    # strapline should not claim otherwise on either.
+    sub_en = i18n.STRINGS["en"].get(sub_key, i18n.STRINGS["en"]["sub"])
     # Both dictionaries travel with the page (boot island) so the toggle is a
     # pure client swap and a take-home bundle stays bilingual offline. English is
     # the baseline text; applyLang() swaps to the reader's language on load.
@@ -277,12 +324,12 @@ def render_page(sections: List[str], index_html: str, title: str,
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>%s</title><style>%s</style></head><body>'
         '<header class="top"><div class="inner">%s<h1>%s</h1>'
-        '<div class="sub">reel-scout · <span data-i18n="sub">decoded structure '
-        '· read-only</span></div>'
+        '<div class="sub">reel-scout · <span data-i18n="%s">%s</span></div>'
         '</div></header>'
-        '<main>%s%s</main>%s<script>%s</script></body></html>' % (
-            _e(title), style, i18n.TOGGLE_HTML, _e(title), index_html,
-            "\n".join(sections), i18n.boot_island(), i18n.APPLY_JS)
+        '<main>%s%s</main>%s<script>%s</script>%s</body></html>' % (
+            _e(title), style, i18n.TOGGLE_HTML, _e(title), _e(sub_key), _e(sub_en),
+            index_html, "\n".join(sections), i18n.boot_island(), i18n.APPLY_JS,
+            ('<script>%s</script>' % extra_js) if extra_js else "")
     )
 
 
@@ -304,6 +351,211 @@ def render_index(views: List[Dict[str, Any]], href: Callable[[str], str]) -> str
             _e(href(v["video_id"])), _e(v["title"]), struct, overall, notx))
     items.append('</nav>')
     return "\n".join(items)
+
+
+#: Client script for the served library table. Vanilla, inline, no fetch of any
+#: external asset — same constraint the rest of this tool holds itself to.
+#: Only ever shipped by `render_index_page`; the export never includes it.
+ANNOTATE_JS = r"""
+(function(){
+  var table=document.getElementById('library');
+  if(!table) return;
+  var hint=document.getElementById('savehint');
+  var hintTimer;
+  function say(msg, bad){
+    if(!hint) return;
+    hint.textContent=msg; hint.className='savehint'+(bad?' bad':'');
+    clearTimeout(hintTimer);
+    hintTimer=setTimeout(function(){ hint.textContent=''; }, bad?6000:1500);
+  }
+  function t(key, fallback){
+    try{
+      var isl=document.getElementById('rsboot');
+      var lang=localStorage.getItem('rs_lang')||'en';
+      var d=JSON.parse(isl.textContent).i18n[lang]||{};
+      return d[key]||fallback;
+    }catch(e){ return fallback; }
+  }
+  function post(url, body, ok){
+    var x=new XMLHttpRequest();
+    x.open('POST', url, true);
+    x.setRequestHeader('Content-Type','application/json');
+    x.onreadystatechange=function(){
+      if(x.readyState!==4) return;
+      if(x.status>=200 && x.status<300){
+        var data={};
+        try{ data=JSON.parse(x.responseText); }catch(e){}
+        say(t('saved','saved'));
+        if(ok) ok(data);
+      } else {
+        // Loudly, and without clearing the field: the text the user typed is
+        // the only copy if the write did not land.
+        var msg=t('saveFailed','not saved');
+        try{ msg += ' — ' + (JSON.parse(x.responseText).error||x.status); }
+        catch(e){ msg += ' — ' + x.status; }
+        say(msg, true);
+      }
+    };
+    x.send(JSON.stringify(body||{}));
+  }
+  function rowId(el){
+    var tr=el; while(tr && tr.tagName!=='TR') tr=tr.parentNode;
+    return tr ? tr : null;
+  }
+  // --- star toggle ---
+  table.addEventListener('click', function(ev){
+    var btn=ev.target;
+    while(btn && btn!==table && !(btn.classList && btn.classList.contains('starbtn'))) btn=btn.parentNode;
+    if(!btn || btn===table || btn.id==='starfilter') return;
+    var tr=rowId(btn); if(!tr) return;
+    var on=tr.getAttribute('data-starred')==='1';
+    var next=!on;
+    tr.setAttribute('data-starred', next?'1':'0');
+    btn.setAttribute('aria-pressed', next?'true':'false');
+    btn.querySelector('.glyph').textContent = next?'★':'☆';
+    applyFilter();
+    post('/api/annotate/'+tr.getAttribute('data-vid'), {starred: next});
+  });
+  // --- group select ---
+  table.addEventListener('change', function(ev){
+    var sel=ev.target;
+    if(!sel.classList || !sel.classList.contains('groupsel')) return;
+    var tr=rowId(sel); if(!tr) return;
+    post('/api/annotate/'+tr.getAttribute('data-vid'),
+         {group_id: sel.value ? parseInt(sel.value,10) : null});
+  });
+  // --- note, debounced ---
+  var timers={};
+  table.addEventListener('input', function(ev){
+    var inp=ev.target;
+    if(!inp.classList || !inp.classList.contains('noteinput')) return;
+    var tr=rowId(inp); if(!tr) return;
+    var vid=tr.getAttribute('data-vid');
+    clearTimeout(timers[vid]);
+    timers[vid]=setTimeout(function(){
+      post('/api/annotate/'+vid, {note: inp.value});
+    }, 600);
+  });
+  // Typing then closing the tab inside the debounce window would lose the note.
+  table.addEventListener('focusout', function(ev){
+    var inp=ev.target;
+    if(!inp.classList || !inp.classList.contains('noteinput')) return;
+    var tr=rowId(inp); if(!tr) return;
+    var vid=tr.getAttribute('data-vid');
+    if(timers[vid]){ clearTimeout(timers[vid]); post('/api/annotate/'+vid, {note: inp.value}); }
+  });
+  // --- header star = filter ---
+  var filter=document.getElementById('starfilter');
+  function applyFilter(){
+    var on=filter && filter.getAttribute('aria-pressed')==='true';
+    [].forEach.call(table.tBodies[0].rows, function(tr){
+      tr.style.display = (on && tr.getAttribute('data-starred')!=='1') ? 'none' : '';
+    });
+  }
+  if(filter){
+    filter.addEventListener('click', function(){
+      var on=filter.getAttribute('aria-pressed')==='true';
+      filter.setAttribute('aria-pressed', on?'false':'true');
+      filter.querySelector('.glyph').textContent = on?'☆':'★';
+      applyFilter();
+    });
+  }
+  // --- add a group ---
+  var ng=document.getElementById('newgroup'), add=document.getElementById('addgroup');
+  function addGroup(){
+    var name=(ng.value||'').trim();
+    if(!name) return;
+    post('/api/groups', {name: name}, function(data){
+      if(!data.group) return;
+      [].forEach.call(table.querySelectorAll('select.groupsel'), function(sel){
+        var o=document.createElement('option');
+        o.value=data.group.id; o.textContent=data.group.name;
+        sel.appendChild(o);
+      });
+      ng.value='';
+    });
+  }
+  if(add) add.addEventListener('click', addGroup);
+  if(ng) ng.addEventListener('keydown', function(ev){ if(ev.key==='Enter') addGroup(); });
+})();
+"""
+
+
+def _row_meta(v: Dict[str, Any]) -> str:
+    """The chips that follow a title: decoded structure, and the no-transcript
+    caveat. Same content as the nav list, so the two surfaces read alike."""
+    struct = ('<span class="sc">%s</span>' % _e(v["content_structure"])
+              if v["content_structure"] else "")
+    notx = ('<span class="sc warn"><span data-i18n="noTranscript">'
+            '⚠ no transcript</span></span>') if not v.get("has_transcript") else ""
+    return struct + notx
+
+
+def render_library_table(views: List[Dict[str, Any]], href: Callable[[str], str],
+                         annotations: Dict[str, Dict[str, Any]],
+                         groups: List[Dict[str, Any]]) -> str:
+    """The served library list: a real table, because it now carries per-row
+    controls (star, group, note) that a list of links has nowhere to put.
+
+    The take-home export keeps `render_index` — it has no server to write to, and
+    the decision was that annotations are working state, not something that ships
+    to a reader. Two renderers, one deliberate difference.
+    """
+    opts_blank = ('<option value="" data-i18n="groupNone">— none —</option>')
+    rows = []
+    for v in views:
+        vid = v["video_id"]
+        ann = annotations.get(vid) or {}
+        starred = bool(ann.get("starred"))
+        note = ann.get("note") or ""
+        gid = ann.get("group_id")
+        opts = [opts_blank]
+        for g in groups:
+            opts.append('<option value="%d"%s>%s</option>' % (
+                int(g["id"]), " selected" if gid == g["id"] else "", _e(g["name"])))
+        overall = ""
+        if v["score"] and v["score"].get("overall") is not None:
+            overall = "%.1f" % v["score"]["overall"]
+        rows.append(
+            '<tr data-vid="%s" data-starred="%d">'
+            '<td class="c-star"><button type="button" class="starbtn" '
+            'aria-pressed="%s"><span class="glyph">%s</span></button></td>'
+            '<td class="c-title"><a href="%s">%s</a>%s</td>'
+            '<td class="c-group"><select class="groupsel">%s</select></td>'
+            '<td class="c-score">%s</td>'
+            '<td class="c-note"><input type="text" class="noteinput" value="%s" '
+            'maxlength="%d" data-i18n-ph="notePlaceholder" '
+            'placeholder="what is this one for?"></td>'
+            '</tr>' % (
+                _e(vid), 1 if starred else 0,
+                "true" if starred else "false", "★" if starred else "☆",
+                _e(href(vid)), _e(v["title"]), _row_meta(v),
+                "".join(opts), overall, _e(note), annotate.MAX_NOTE_LEN))
+
+    head = (
+        '<table class="library" id="library"><thead><tr>'
+        # The header star is the filter: one glyph that means "show me only the
+        # ones I marked". Its pressed state is what the rows below react to.
+        '<th class="c-star"><button type="button" id="starfilter" class="starbtn hdr" '
+        'aria-pressed="false" data-i18n-title="onlyStarred" title="show starred only">'
+        '<span class="glyph">☆</span></button></th>'
+        '<th class="c-title" data-i18n="col.title">Title</th>'
+        '<th class="c-group" data-i18n="col.group">Group</th>'
+        '<th class="c-score" data-i18n="col.score">Score</th>'
+        '<th class="c-note" data-i18n="col.note">Note</th>'
+        '</tr></thead><tbody>')
+    tail = '</tbody></table>'
+    # Above the table, not below it: the library is the whole corpus, and a
+    # control parked after 96 rows is a control nobody finds. The save hint
+    # lives here too, so it is on screen while you are typing in a top row.
+    newgroup = (
+        '<div class="libtools">'
+        '<input type="text" id="newgroup" maxlength="%d" data-i18n-ph="newGroupPh" '
+        'placeholder="new group name">'
+        '<button type="button" id="addgroup" data-i18n="addGroup">add group</button>'
+        '<span class="savehint" id="savehint"></span>'
+        '</div>' % annotate.MAX_GROUP_NAME_LEN)
+    return newgroup + head + "".join(rows) + tail
 
 
 def render_bundle(conn: db.sqlite3.Connection, video_id: Optional[str] = None,
@@ -344,12 +596,12 @@ def render_index_page(conn: db.sqlite3.Connection, title: str = "reel-scout",
         body = ('<section class="video"><p data-i18n="emptyLibrary">'
                 'No analyzed videos yet.</p></section>')
         return render_page([body], "", title)
-    nav = render_index(views, href=href)
-    # render_index returns "" for a single video; always show the list on the server.
-    if not nav:
-        nav = ('<nav class="index"><a href="%s">%s</a></nav>'
-               % (_e(href(views[0]["video_id"])), _e(views[0]["title"])))
-    return render_page([], nav, title)
+    # One query for every annotation rather than one per row: the library is the
+    # page most likely to hold the whole corpus at once.
+    table = render_library_table(views, href=href,
+                                 annotations=annotate.all_annotations(conn),
+                                 groups=annotate.list_groups(conn))
+    return render_page([], table, title, extra_js=ANNOTATE_JS, sub_key="subLive")
 
 
 def render_video_page(conn: db.sqlite3.Connection, video_id: str) -> Optional[str]:

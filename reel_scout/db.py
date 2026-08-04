@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from . import config
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -110,9 +110,31 @@ CREATE TABLE IF NOT EXISTS batch_items (
     PRIMARY KEY (batch_id, url)
 );
 
+-- User annotations. Deliberately NOT columns on `videos`: everything else in
+-- this database is derived from the source clip and is safe to regenerate, but
+-- these rows are the operator's own judgement. Keeping them in their own tables
+-- is what lets re-crawl / re-analyze / re-score rewrite the pipeline's output
+-- without ever touching a note someone typed.
+CREATE TABLE IF NOT EXISTS annotation_groups (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    sort_order      INTEGER DEFAULT 0,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS video_annotations (
+    video_id        TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+    note            TEXT,
+    group_id        INTEGER REFERENCES annotation_groups(id) ON DELETE SET NULL,
+    starred         INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status);
 CREATE INDEX IF NOT EXISTS idx_videos_platform ON videos(platform);
 CREATE INDEX IF NOT EXISTS idx_batch_items_status ON batch_items(status);
+CREATE INDEX IF NOT EXISTS idx_annotations_group ON video_annotations(group_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_starred ON video_annotations(starred);
 """
 # analyses tag indexes are created after migrations (see init_db) so they don't
 # run against a pre-v5 DB whose analyses table lacks these columns yet.
@@ -379,6 +401,39 @@ def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """User annotations: note / group / star (schema v10 -> v11).
+
+    Two new tables, nothing altered. The pipeline tables are not touched at all,
+    which is the point: a note survives every re-crawl, re-analyze and re-score,
+    because none of those writers knows these tables exist.
+
+    `group_id` is ON DELETE SET NULL rather than CASCADE — deleting a group must
+    lose the grouping, never the note that was filed under it.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS annotation_groups (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT NOT NULL UNIQUE,
+            sort_order      INTEGER DEFAULT 0,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS video_annotations (
+            video_id        TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+            note            TEXT,
+            group_id        INTEGER REFERENCES annotation_groups(id) ON DELETE SET NULL,
+            starred         INTEGER NOT NULL DEFAULT 0,
+            updated_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_annotations_group ON video_annotations(group_id);
+        CREATE INDEX IF NOT EXISTS idx_annotations_starred ON video_annotations(starred);
+        """
+    )
+    conn.execute("UPDATE schema_version SET version = 11 WHERE version = 10")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         conn = get_connection()
@@ -417,6 +472,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 9
         if current_ver < 10:
             _migrate_v9_to_v10(conn)
+            current_ver = 10
+        if current_ver < 11:
+            _migrate_v10_to_v11(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -1041,3 +1099,119 @@ def get_latest_batch(conn: sqlite3.Connection,
             "LIMIT 1", (source,)).fetchone()
     return conn.execute(
         "SELECT * FROM batches ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone()
+
+
+# --- Annotation CRUD (note / group / star) ---
+# Storage primitives only. Name resolution, validation and the shape the CLI /
+# MCP / HTTP surfaces agree on live in annotate.py, so all three write the same
+# way and there is one place to change the rules.
+
+def list_groups(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    return conn.execute(
+        "SELECT g.*, ("
+        "  SELECT COUNT(*) FROM video_annotations a WHERE a.group_id = g.id"
+        ") AS video_count "
+        "FROM annotation_groups g ORDER BY g.sort_order, g.name"
+    ).fetchall()
+
+
+def get_group(conn: sqlite3.Connection, group_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM annotation_groups WHERE id = ?", (group_id,)).fetchone()
+
+
+def get_group_by_name(conn: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM annotation_groups WHERE name = ? COLLATE NOCASE",
+        (name,)).fetchone()
+
+
+def create_group(conn: sqlite3.Connection, name: str,
+                 sort_order: int = 0) -> sqlite3.Row:
+    conn.execute(
+        "INSERT INTO annotation_groups (name, sort_order) VALUES (?, ?)",
+        (name, sort_order))
+    conn.commit()
+    row = get_group_by_name(conn, name)
+    assert row is not None  # just inserted
+    return row
+
+
+def rename_group(conn: sqlite3.Connection, group_id: int, name: str) -> bool:
+    cur = conn.execute(
+        "UPDATE annotation_groups SET name = ? WHERE id = ?", (name, group_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_group(conn: sqlite3.Connection, group_id: int) -> bool:
+    """Drop a group. Rows filed under it keep their note and star; only the
+    grouping is cleared (the FK is ON DELETE SET NULL). Done explicitly as well,
+    because PRAGMA foreign_keys is per-connection and a caller may have it off."""
+    conn.execute(
+        "UPDATE video_annotations SET group_id = NULL WHERE group_id = ?", (group_id,))
+    cur = conn.execute("DELETE FROM annotation_groups WHERE id = ?", (group_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_annotation(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM video_annotations WHERE video_id = ?", (video_id,)).fetchone()
+
+
+def list_annotations(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    """Every annotation, keyed by video_id, with the group name joined in.
+
+    One query for the whole library: the list page needs a row per video and
+    would otherwise issue N+1 of them.
+    """
+    rows = conn.execute(
+        "SELECT a.video_id, a.note, a.group_id, a.starred, a.updated_at, "
+        "       g.name AS group_name "
+        "FROM video_annotations a "
+        "LEFT JOIN annotation_groups g ON g.id = a.group_id"
+    ).fetchall()
+    return {r["video_id"]: dict(r) for r in rows}
+
+
+def set_annotation(conn: sqlite3.Connection, video_id: str,
+                   note: Optional[str] = None,
+                   group_id: Optional[int] = None,
+                   starred: Optional[bool] = None,
+                   clear_group: bool = False) -> Dict[str, Any]:
+    """Upsert one video's annotation. Only the fields passed are written.
+
+    `None` means "leave alone", which is why clearing the group needs its own
+    flag — otherwise there would be no way to express "file this under nothing"
+    through the same call that leaves the note untouched.
+    """
+    existing = get_annotation(conn, video_id)
+    if existing is None:
+        conn.execute(
+            "INSERT INTO video_annotations (video_id, note, group_id, starred) "
+            "VALUES (?, ?, ?, ?)",
+            (video_id, note, None if clear_group else group_id,
+             1 if starred else 0))
+    else:
+        sets, params = [], []  # type: List[str], List[Any]
+        if note is not None:
+            sets.append("note = ?")
+            params.append(note)
+        if clear_group:
+            sets.append("group_id = NULL")
+        elif group_id is not None:
+            sets.append("group_id = ?")
+            params.append(group_id)
+        if starred is not None:
+            sets.append("starred = ?")
+            params.append(1 if starred else 0)
+        if sets:
+            sets.append("updated_at = datetime('now')")
+            params.append(video_id)
+            conn.execute(
+                "UPDATE video_annotations SET %s WHERE video_id = ?" % ", ".join(sets),
+                params)
+    conn.commit()
+    row = get_annotation(conn, video_id)
+    return dict(row) if row else {}

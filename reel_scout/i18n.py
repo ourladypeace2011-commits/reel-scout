@@ -77,6 +77,19 @@ STRINGS = {
         "row.Content type": "Content type",
         "row.Hook type": "Hook type",
         "row.CTA type": "CTA type",
+        # --- library table + annotations (served list only, never the export) ---
+        "subLive": "decoded structure · your notes save here",
+        "col.title": "Title",
+        "col.group": "Group",
+        "col.score": "Score",
+        "col.note": "Note",
+        "groupNone": "— none —",
+        "notePlaceholder": "what is this one for?",
+        "newGroupPh": "new group name",
+        "addGroup": "add group",
+        "onlyStarred": "show starred only",
+        "saved": "saved",
+        "saveFailed": "not saved",
     },
     "zh": {
         # --- inspector ---
@@ -138,6 +151,19 @@ STRINGS = {
         "row.Content type": "內容類型",
         "row.Hook type": "開場類型",
         "row.CTA type": "行動呼籲類型",
+        # --- 清單表格 + 註記（僅現場清單頁，匯出永遠不含） ---
+        "subLive": "解構分析 · 你的註記會存下來",
+        "col.title": "標題",
+        "col.group": "分組",
+        "col.score": "分數",
+        "col.note": "備註",
+        "groupNone": "— 未分組 —",
+        "notePlaceholder": "這支要拿來做什麼？",
+        "newGroupPh": "新分組名稱",
+        "addGroup": "新增分組",
+        "onlyStarred": "只看已收藏",
+        "saved": "已儲存",
+        "saveFailed": "未儲存",
     },
 }
 
@@ -185,6 +211,14 @@ APPLY_JS = r"""
     document.documentElement.lang=(lang==='zh'?'zh-Hant':'en');
     [].forEach.call(document.querySelectorAll('[data-i18n]'),function(el){
       var k=el.getAttribute('data-i18n'); if(d[k]!=null) el.textContent=d[k];
+    });
+    // Attribute-carried chrome (a placeholder, a tooltip) needs its own pass —
+    // textContent would wipe an <input>'s value or an <option> list instead.
+    [].forEach.call(document.querySelectorAll('[data-i18n-ph]'),function(el){
+      var k=el.getAttribute('data-i18n-ph'); if(d[k]!=null) el.placeholder=d[k];
+    });
+    [].forEach.call(document.querySelectorAll('[data-i18n-title]'),function(el){
+      var k=el.getAttribute('data-i18n-title'); if(d[k]!=null) el.title=d[k];
     });
     [].forEach.call(document.querySelectorAll('#lang .langbtn'),function(b){
       b.classList.toggle('on', b.getAttribute('data-lang')===lang);

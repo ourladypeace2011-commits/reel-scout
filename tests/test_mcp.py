@@ -38,6 +38,8 @@ EXPECTED_TOOLS = {
     "patterns",
     "inspire",
     "research",
+    "annotate",
+    "list_annotations",
 }
 
 

@@ -388,6 +388,42 @@ def list_tools() -> List[Dict[str, Any]]:
                 "required": ["niche", "channels"],
             },
         },
+        {
+            "name": "annotate",
+            "description": (
+                "Set the operator's own layer on a video — a note about what it is "
+                "for, which group it files under, whether it is starred. Stored "
+                "separately from the analysis, so re-analyzing never overwrites it. "
+                "Omitted fields are left alone."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "video_id": {"type": "string",
+                                 "description": "URL, video id, or unique id prefix"},
+                    "note": {"type": "string"},
+                    "group": {"type": "string",
+                              "description": "Group name or id; empty string removes the grouping"},
+                    "create_group": {"type": "boolean", "default": False},
+                    "starred": {"type": "boolean"},
+                },
+                "required": ["video_id"],
+            },
+        },
+        {
+            "name": "list_annotations",
+            "description": (
+                "Every note / group / star in the library, plus the group list. "
+                "Use it to find what you filed under a group or marked to revisit."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group": {"type": "string", "description": "Only this group (name or id)"},
+                    "starred_only": {"type": "boolean", "default": False},
+                },
+            },
+        },
     ]
 
 
@@ -1350,8 +1386,56 @@ def _tool_inspect(args: Dict[str, Any]) -> Dict[str, Any]:
 #: decide whether a tool is callable and whether it is visible, and nothing about
 #: the code makes them agree. A tool missing here answers "Unknown tool"; a tool
 #: missing there is invisible but callable.
+def _tool_annotate(args: Dict[str, Any]) -> Dict[str, Any]:
+    from .. import annotate as ann_mod, db
+
+    conn = db.init_db()
+    try:
+        video_id, err = _resolve_video(conn, args.get("video_id") or "")
+        if err is not None:
+            return err
+        group = args.get("group")
+        try:
+            ann = ann_mod.set_annotation(
+                conn, video_id,
+                note=args.get("note"),
+                group=None if group == "" else group,
+                starred=args.get("starred"),
+                clear_group=(group == ""),
+                create_group=bool(args.get("create_group")),
+            )
+        except ann_mod.AnnotateError as exc:
+            return _error_result(str(exc))
+        return _text_result({"video_id": video_id, "annotation": ann})
+    finally:
+        conn.close()
+
+
+def _tool_list_annotations(args: Dict[str, Any]) -> Dict[str, Any]:
+    from .. import annotate as ann_mod, db
+
+    conn = db.init_db()
+    try:
+        groups = ann_mod.list_groups(conn)
+        rows = list(ann_mod.all_annotations(conn).values())
+        if args.get("starred_only"):
+            rows = [r for r in rows if r.get("starred")]
+        want = args.get("group")
+        if want not in (None, ""):
+            try:
+                gid = ann_mod.resolve_group(conn, want)
+            except ann_mod.AnnotateError as exc:
+                return _error_result(str(exc))
+            rows = [r for r in rows if r.get("group_id") == gid]
+        return _text_result({"groups": groups, "annotations": rows})
+    finally:
+        conn.close()
+
+
 _HANDLERS = {
     "crawl": _tool_crawl,
+    "annotate": _tool_annotate,
+    "list_annotations": _tool_list_annotations,
     "analyze": _tool_analyze,
     "list_videos": _tool_list_videos,
     "show_video": _tool_show_video,

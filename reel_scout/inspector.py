@@ -26,7 +26,7 @@ import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import config, db, i18n, theme
+from . import annotate, config, db, i18n, theme
 from .viewer import build_video_view
 
 _SCORE_DIMS = [
@@ -560,7 +560,55 @@ def make_inspect_server(host: str = "127.0.0.1", port: int = 0,
             finally:
                 conn.close()
 
+        def do_POST(self):
+            """The only write surface in the app, and it is narrow on purpose:
+            the annotation endpoints and nothing else. Everything the pipeline
+            produced stays read-only over HTTP."""
+            path = self.path.split("?", 1)[0]
+            if not (path.startswith("/api/annotate/") or path == "/api/groups"
+                    or path.startswith("/api/groups/")):
+                self._send(404, "not found")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            # A note is small; a multi-megabyte body here is a mistake or an
+            # abuse, and reading it first would be the damage.
+            if length > 64 * 1024:
+                self._send(413, json.dumps({"error": "payload too large"}),
+                           "application/json")
+                return
+            raw = self.rfile.read(length) if length else b""
+            try:
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
+            except (ValueError, UnicodeDecodeError):
+                self._send(400, json.dumps({"error": "invalid JSON"}),
+                           "application/json")
+                return
+            if not isinstance(payload, dict):
+                self._send(400, json.dumps({"error": "expected a JSON object"}),
+                           "application/json")
+                return
+            conn = db.get_connection()
+            try:
+                status, body = annotate.handle_api(conn, "POST", path, payload)
+            finally:
+                conn.close()
+            self._send(status, json.dumps(body, ensure_ascii=False),
+                       "application/json; charset=utf-8")
+
         def _route(self, path, conn):
+            if path == "/api/groups" or path.startswith("/api/groups/"):
+                status, body = annotate.handle_api(conn, "GET", path, None)
+                self._send(status, json.dumps(body, ensure_ascii=False),
+                           "application/json; charset=utf-8")
+                return
+            if path.startswith("/api/annotate/"):
+                status, body = annotate.handle_api(conn, "GET", path, None)
+                self._send(status, json.dumps(body, ensure_ascii=False),
+                           "application/json; charset=utf-8")
+                return
             if path in ("/", "/inspect", "/inspect/"):
                 # One app, not two servers: `inspect <id>` pins a video and opens
                 # straight into it, while `view` (no default) lands on the library

@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added
+- **Your own layer on the library: a note, a group, a star.** The served list
+  (`reel-scout view`) is now a table, because it carries per-row controls a list
+  of links had nowhere to put: a **star** to mark what is worth coming back to,
+  a **group** dropdown you define yourself (add / rename / delete), and a free-text
+  **note** for what a clip is *for*. The star in the table header is the filter —
+  press it to show only what you marked. Notes save as you type; the group and the
+  star save on the spot.
+
+  The pipeline decodes what a video *is*; none of it knows what you intend to do
+  with it, and that intent is the part worth typing by hand.
+
+  Same three fields from the CLI (`reel-scout note <ref> --text … --group … --star`,
+  `reel-scout group list|add|rename|rm`) and over MCP (`annotate`,
+  `list_annotations`), all going through one operations module so the rules —
+  group names unique case-insensitively, notes rejected rather than truncated —
+  are enforced once instead of three times, slightly differently.
+
+### Notes
+- **Annotations live in their own tables** (`video_annotations`,
+  `annotation_groups`; schema v11), never as columns on `videos`. Everything else
+  in the database is derived from the source clip and is safe to regenerate;
+  these rows are the operator's judgement. Re-crawling, re-analyzing and
+  re-scoring rewrite the pipeline's output and cannot touch a note — there is a
+  test that holds that line. Deleting a group clears the filing and keeps every
+  note and star.
+- **The take-home export ships no annotations.** They are working state, not
+  something a reader should receive; the exported single-file HTML has no server
+  to write to and stays entirely read-only, and its strapline still says so. The
+  served list gets its own strapline, because claiming "read-only" on a page that
+  writes would be a lie.
+- **The HTTP write surface is narrow on purpose**: `POST` is accepted only on the
+  annotation endpoints, bodies over 64 KB are refused before being read, and
+  everything the pipeline produced remains read-only over HTTP.
+
 ## 1.3.0 — 2026-07-21
 
 ### Added
