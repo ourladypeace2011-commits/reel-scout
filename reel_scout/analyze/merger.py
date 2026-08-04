@@ -138,7 +138,14 @@ def merge_analysis(
             )
 
     # Build transcript with speaker labels if available
-    if transcript:
+    # Three real states, not two: no row, a row with words, and a row whose ASR
+    # found nothing. The last one used to fall through the `if transcript:`
+    # branch and hand the prompt an empty string, so the model saw a "##
+    # Transcript" heading with nothing under it -- indistinguishable from a
+    # section that failed to render. It has no way to tell "nobody spoke" from
+    # "the words are missing", and a clip whose only text is a title card gets
+    # its opening classified as something that was said.
+    if transcript and (transcript["text_full"] or "").strip():
         import json as _json
         segs = _json.loads(transcript["segments_json"] or "[]")
         if segs and segs[0].get("speaker"):
