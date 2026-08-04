@@ -207,6 +207,24 @@ def test_served_list_is_a_table_with_the_controls(conn):
     assert "/api/annotate/" in html                        # the writer script
 
 
+def test_group_delete_control_is_offered_and_scoped_to_the_toolbar(conn):
+    """Deleting a group is a library-wide action, so it lives in the toolbar —
+    not as an ✕ inside a per-video dropdown, where it would be one slip away
+    from destroying a group when you meant to unfile one clip."""
+    vid = _seed(conn)
+    g = annotate.add_group(conn, "Course")
+    annotate.set_annotation(conn, vid, group=g["id"])
+
+    html = viewer.render_index_page(conn)
+
+    assert 'id="delgroup"' in html and 'id="rmgroup"' in html
+    # The picker shows how many rows a group holds — that count is the warning.
+    assert "Course (1)" in html
+    assert "/api/groups/" in html            # the delete call
+    # No confirm() anywhere: a modal blocks the page and this is cheap to undo.
+    assert "confirm(" not in html
+
+
 def test_export_bundle_carries_no_annotations_and_no_writer(conn):
     """Annotations are working state; the take-home file must not ship them."""
     vid = _seed(conn)

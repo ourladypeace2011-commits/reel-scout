@@ -108,6 +108,16 @@ KEYFRAME_STRATEGY = os.getenv("KEYFRAME_STRATEGY", "scene")
 # exceeds this. Default 8 (cost-conservative); raise it to let duration-aware
 # budgeting (招②) actually spread more frames across longer videos.
 KEYFRAME_MAX = int(os.getenv("KEYFRAME_MAX", "8"))
+# Above KEYFRAME_LONG_SEC the cap stops being flat and earns frames by the minute,
+# because one number cannot serve both a 9-second reel and an 82-minute interview:
+# the reel gets sampled about once a second, the interview once every seven minutes,
+# and the interview's `timeline` degenerates into one segment covering most of the
+# clip. Short-form is untouched — the curve only starts above the threshold, and
+# KEYFRAME_MAX_LONG is the ceiling that keeps the VLM bill bounded (82 min asks for
+# 164 frames at 2/min and is told 40). See keyframe.frame_cap().
+KEYFRAME_LONG_SEC = float(os.getenv("KEYFRAME_LONG_SEC", "180"))
+KEYFRAME_PER_MIN = float(os.getenv("KEYFRAME_PER_MIN", "2"))
+KEYFRAME_MAX_LONG = int(os.getenv("KEYFRAME_MAX_LONG", "40"))
 # Optional upscale (long edge px) applied to extracted keyframes so the VLM can read
 # small on-screen text (招④). 0 = keep native resolution (no scaling, default).
 KEYFRAME_RESOLUTION = int(os.getenv("KEYFRAME_RESOLUTION", "0"))
@@ -203,6 +213,9 @@ def show() -> str:
         f"RATE_LIMIT_PER_MINUTE:{RATE_LIMIT_PER_MINUTE}",
         f"KEYFRAME_STRATEGY:    {KEYFRAME_STRATEGY}",
         f"KEYFRAME_MAX:         {KEYFRAME_MAX}",
+        f"KEYFRAME_LONG_SEC:    {KEYFRAME_LONG_SEC}",
+        f"KEYFRAME_PER_MIN:     {KEYFRAME_PER_MIN}",
+        f"KEYFRAME_MAX_LONG:    {KEYFRAME_MAX_LONG}",
         f"KEYFRAME_RESOLUTION:  {KEYFRAME_RESOLUTION or '(native)'}",
         f"PANNS_MODEL_PATH:     {PANNS_MODEL_PATH or '(not set)'}",
         f"AUDIO_WINDOW_SEC:     {AUDIO_WINDOW_SEC}",
