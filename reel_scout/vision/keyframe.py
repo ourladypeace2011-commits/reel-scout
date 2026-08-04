@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -29,7 +30,7 @@ def auto_frame_budget(duration_sec: float, focused: bool = False) -> int:
     IMPORTANT — cost discipline: in reel-scout each keyframe is one *local VLM
     call* (compute, not tokens). The raw claude-video budget can reach 100 frames,
     which would blow up VLM cost. The caller is responsible for clamping the return
-    value to ``config.KEYFRAME_MAX`` (see ``extract_keyframes``); this function only
+    value to ``frame_cap(duration)`` (see ``extract_keyframes``); this function only
     encodes the duration→frame curve, capped at the claude-video hard ceiling of 100.
     """
     if duration_sec <= 0:
@@ -67,6 +68,29 @@ def auto_frame_budget(duration_sec: float, focused: bool = False) -> int:
 
     # Hard ceiling from claude-video.
     return min(budget, 100)
+
+
+def frame_cap(duration_sec: float) -> int:
+    """The cost ceiling for one clip, in keyframes.
+
+    Each keyframe is one local VLM call, so this is a compute budget, not a
+    formatting preference — which is why a single flat number governed it for a
+    long time. The flat number is wrong in one direction only: a 9-second reel
+    and an 82-minute interview both got `KEYFRAME_MAX` frames, so the reel was
+    sampled roughly once a second while the interview was sampled once every
+    seven minutes. Downstream that shows up as a `timeline` whose single segment
+    covers 96% of the clip — technically produced, practically useless.
+
+    So the cap stays flat up to `KEYFRAME_LONG_SEC` (short-form keeps its exact
+    previous behaviour, bit for bit) and above it earns frames at
+    `KEYFRAME_PER_MIN` a minute, never exceeding `KEYFRAME_MAX_LONG`. The
+    ceiling is the point: an 82-minute clip asks for 164 frames at 2/min and is
+    told 40. Long-form gets a usable sampling rate, not an unbounded bill.
+    """
+    if duration_sec <= 0 or duration_sec <= config.KEYFRAME_LONG_SEC:
+        return config.KEYFRAME_MAX
+    earned = int(math.ceil(duration_sec / 60.0 * config.KEYFRAME_PER_MIN))
+    return max(config.KEYFRAME_MAX, min(earned, config.KEYFRAME_MAX_LONG))
 
 
 def _ensure_first_last(
@@ -186,8 +210,9 @@ def extract_keyframes(
             budget = auto_frame_budget(window, focused=True)
         else:
             budget = auto_frame_budget(duration, focused=False)
-        # COST RED LINE: never spend more local VLM calls than KEYFRAME_MAX allows.
-        max_frames = min(budget, config.KEYFRAME_MAX)
+        # COST RED LINE: never spend more local VLM calls than the cap allows.
+        max_frames = min(budget, frame_cap(duration if not focused else
+                                           (end_sec or duration) - (start_sec or 0.0)))
     # else: caller forced an explicit count (e.g. --keyframe-max); respect it as-is.
 
     os.makedirs(output_dir, exist_ok=True)

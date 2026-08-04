@@ -16,7 +16,7 @@ see [`../prompts/signal-reliability-cheatsheet.md`](../prompts/signal-reliabilit
 | `export --format json\|csv\|html\|bundle` | Export analyses. `html` = one self-contained file; **`bundle`** = one self-contained file *per reel* + an index (the course take-home). |
 | `view` | Local web server for the library: a table with star / group / note per row. The analysis stays read-only; only your own annotations write back. |
 | `note <ref>` | Annotate a clip. `--text`, `--group <name>` (`--new-group`), `--no-group`, `--star` / `--unstar`, `--json`. |
-| `group {list,add,rename,rm}` | Manage the annotation groups. `rm` clears the filing and keeps every note and star. |
+| `group {list,add,rename,rm}` | Manage the annotation groups (also doable from the list page toolbar). `rm` clears the filing and keeps every note and star. |
 | `inspect <id>` | Interactive single-clip viewer (transcript↔keyframe time-sync). |
 | `score <id>` | Craft score (hook / visual / **pacing (evidence-based, §4E)** / structure). |
 | `ingest {vision,analysis,score} <id> --from-json <path\|->` | Write **agent-produced** frame descriptions / structured analysis / craft scores back into the DB, for machines with no local model. `--model` required; stored as `agent:<model>`. Analysis enums are validated. |

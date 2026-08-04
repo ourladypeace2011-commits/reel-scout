@@ -295,6 +295,10 @@ select.groupsel:focus,input.noteinput:focus,#newgroup:focus{outline:0;
 .libtools{display:flex;align-items:center;gap:8px;margin:0 0 1rem;
   font-family:var(--mono);font-size:11px;flex-wrap:wrap}
 .libtools #newgroup{width:14rem}
+.libtools #delgroup{font-family:inherit;font-size:11px;color:var(--ink);
+  background:var(--bg);border:1px solid var(--rule-soft);border-radius:3px;
+  padding:4px 6px;max-width:16rem}
+.toolsep{width:1px;height:18px;background:var(--rule-soft);margin:0 4px}
 .libtools button{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
   text-transform:uppercase;padding:5px 10px;border:1px solid var(--rule-soft);
   background:none;color:var(--quiet);cursor:pointer;border-radius:3px}
@@ -472,11 +476,44 @@ ANNOTATE_JS = r"""
         o.value=data.group.id; o.textContent=data.group.name;
         sel.appendChild(o);
       });
+      // The delete picker is offered the new group too, or it would only ever
+      // list what happened to exist when the page was rendered.
+      var del=document.getElementById('delgroup');
+      if(del){
+        var d=document.createElement('option');
+        d.value=data.group.id; d.textContent=data.group.name+' (0)';
+        del.appendChild(d);
+      }
       ng.value='';
     });
   }
   if(add) add.addEventListener('click', addGroup);
   if(ng) ng.addEventListener('keydown', function(ev){ if(ev.key==='Enter') addGroup(); });
+  // --- delete a group ---
+  // Deliberately no blocking browser dialog: a modal freezes the whole page
+  // (and anything driving it), and this action is cheap to undo — notes and
+  // stars survive, only the filing is cleared. The row count in each label
+  // carries the warning instead.
+  var del=document.getElementById('delgroup'), rm=document.getElementById('rmgroup');
+  if(rm && del){
+    rm.addEventListener('click', function(){
+      var gid=del.value;
+      if(!gid) return;
+      post('/api/groups/'+gid, {delete: true}, function(){
+        // Drop it everywhere it is offered and un-file the rows that used it:
+        // the server already did, and a stale <select> would lie about it.
+        [].forEach.call(table.querySelectorAll('select.groupsel'), function(sel){
+          var opt=sel.querySelector('option[value="'+gid+'"]');
+          if(!opt) return;
+          if(sel.value===gid) sel.value='';
+          opt.parentNode.removeChild(opt);
+        });
+        var picked=del.querySelector('option[value="'+gid+'"]');
+        if(picked) picked.parentNode.removeChild(picked);
+        del.value='';
+      });
+    });
+  }
 })();
 """
 
@@ -548,13 +585,25 @@ def render_library_table(views: List[Dict[str, Any]], href: Callable[[str], str]
     # Above the table, not below it: the library is the whole corpus, and a
     # control parked after 96 rows is a control nobody finds. The save hint
     # lives here too, so it is on screen while you are typing in a top row.
+    # Deleting is a picker plus a button rather than an X on each dropdown row:
+    # a group is a library-wide object, and putting its destructor inside a
+    # per-video control invites deleting the group when you meant to unfile one clip.
+    manage = ['<select id="delgroup"><option value="" data-i18n="groupPick">'
+              '— pick a group —</option>']
+    for g in groups:
+        manage.append('<option value="%d">%s (%d)</option>'
+                      % (int(g["id"]), _e(g["name"]), int(g.get("video_count") or 0)))
+    manage.append('</select>')
     newgroup = (
         '<div class="libtools">'
         '<input type="text" id="newgroup" maxlength="%d" data-i18n-ph="newGroupPh" '
         'placeholder="new group name">'
         '<button type="button" id="addgroup" data-i18n="addGroup">add group</button>'
+        '<span class="toolsep"></span>'
+        '%s'
+        '<button type="button" id="rmgroup" data-i18n="removeGroup">delete group</button>'
         '<span class="savehint" id="savehint"></span>'
-        '</div>' % annotate.MAX_GROUP_NAME_LEN)
+        '</div>' % (annotate.MAX_GROUP_NAME_LEN, "".join(manage)))
     return newgroup + head + "".join(rows) + tail
 
 

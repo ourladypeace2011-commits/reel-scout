@@ -3,6 +3,21 @@
 ## Unreleased
 
 ### Added
+- **Long clips get a sampling rate, not the same twelve frames a reel gets.** The
+  keyframe cap was one flat number, so a 9-second reel and an 82-minute interview
+  drew the same budget — the reel sampled about once a second, the interview once
+  every seven minutes. Downstream that produced a `timeline` whose single segment
+  covered 96% of the clip: technically produced, practically useless. The cap now
+  stays flat up to `KEYFRAME_LONG_SEC` (180s — **short-form behaviour is unchanged,
+  bit for bit**) and above it earns `KEYFRAME_PER_MIN` frames a minute up to
+  `KEYFRAME_MAX_LONG` (40). The ceiling is the point: 82 minutes asks for 164
+  frames at 2/min and is told 40. Each frame is still one local VLM call, so the
+  cost red line moved deliberately, not accidentally.
+- **Delete a group from the page.** A picker plus a button in the toolbar, rather
+  than an X inside each row's dropdown — a group is a library-wide object, and its
+  destructor does not belong inside a per-video control. Each option carries its
+  row count as the warning, and deleting still keeps every note and star.
+
 - **Your own layer on the library: a note, a group, a star.** The served list
   (`reel-scout view`) is now a table, because it carries per-row controls a list
   of links had nowhere to put: a **star** to mark what is worth coming back to,

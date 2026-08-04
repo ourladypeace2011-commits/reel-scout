@@ -123,20 +123,72 @@ class TestAutoFrameBudget:
     @patch("reel_scout.vision.keyframe._extract_scene", return_value=[])
     @patch("reel_scout.vision.keyframe._ensure_first_last", side_effect=lambda *a, **k: a[3])
     @patch("reel_scout.vision.keyframe.os.makedirs")
-    def test_auto_budget_clamped_to_keyframe_max(
+    def test_auto_budget_clamped_to_frame_cap(
         self,
         mock_makedirs: MagicMock,
         mock_ensure: MagicMock,
         mock_scene: MagicMock,
         mock_duration: MagicMock,
     ) -> None:
-        # COST RED LINE: even a 15-min clip (raw budget 100) must clamp to KEYFRAME_MAX
-        from reel_scout.vision.keyframe import extract_keyframes
+        # COST RED LINE still holds: a 15-min clip's raw budget is 100 and never
+        # reaches the extractor. What it clamps *to* is now duration-aware.
+        from reel_scout.vision.keyframe import extract_keyframes, frame_cap
 
         extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1", strategy="scene", max_frames=0)
-        # _extract_scene called with the clamped budget, not 100
         called_max = mock_scene.call_args[0][3]
-        assert called_max == config.KEYFRAME_MAX
+        assert called_max == frame_cap(900.0)
+        assert called_max < 100
+
+
+class TestFrameCap:
+    """The cap that decides how densely a clip gets sampled.
+
+    One flat number could not serve both ends of this library: a 9-second reel
+    and an 82-minute interview drew the same budget, so the interview's timeline
+    came out as a single segment covering most of the clip.
+    """
+
+    def test_short_form_is_unchanged(self) -> None:
+        from reel_scout.vision.keyframe import frame_cap
+
+        # Everything at or under the threshold keeps the old flat behaviour,
+        # which is what makes this safe to land against an existing corpus.
+        for duration in (0.5, 9.0, 34.0, 60.0, config.KEYFRAME_LONG_SEC):
+            assert frame_cap(duration) == config.KEYFRAME_MAX
+
+    def test_unknown_duration_falls_back_to_the_flat_cap(self) -> None:
+        from reel_scout.vision.keyframe import frame_cap
+
+        assert frame_cap(0) == config.KEYFRAME_MAX
+        assert frame_cap(-1) == config.KEYFRAME_MAX
+
+    def test_long_form_earns_frames_by_the_minute(self) -> None:
+        from reel_scout.vision.keyframe import frame_cap
+
+        # 10 minutes at 2/min = 20, which is more than the flat cap and under
+        # the ceiling — the only region where the curve is actually visible.
+        assert frame_cap(600.0) == 20
+        assert frame_cap(600.0) > config.KEYFRAME_MAX
+
+    def test_the_ceiling_binds_before_the_bill_does(self) -> None:
+        from reel_scout.vision.keyframe import frame_cap
+
+        # 82 minutes asks for 164 frames at 2/min. It is told KEYFRAME_MAX_LONG.
+        assert frame_cap(4928.0) == config.KEYFRAME_MAX_LONG
+        assert frame_cap(99999.0) == config.KEYFRAME_MAX_LONG
+
+    def test_never_returns_less_than_the_flat_cap(self) -> None:
+        from reel_scout.vision.keyframe import frame_cap
+
+        # A low per-minute rate must not make a long clip *worse* off than a reel.
+        with patch.object(config, "KEYFRAME_PER_MIN", 0.1):
+            assert frame_cap(300.0) >= config.KEYFRAME_MAX
+
+    def test_monotonic_in_duration(self) -> None:
+        from reel_scout.vision.keyframe import frame_cap
+
+        caps = [frame_cap(d) for d in (10, 180, 300, 600, 1200, 2400, 4800)]
+        assert caps == sorted(caps)
 
 
 class TestScaleAndSeekHelpers:
