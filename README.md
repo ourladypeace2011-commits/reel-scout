@@ -82,7 +82,7 @@ cached) with a click-to-seek playhead, a **keyframe filmstrip**, and the
 **transcript** all seek the player and highlight as it plays. Set **IN/OUT**
 markers on the waveform and export the trimmed window as SRT. Needs the downloaded
 video file on disk. (Design ported from arkiv's live inspector.) `export --format
-html` remains the offline multi-clip bundle; `view` is the read-only browsing
+html` remains the offline multi-clip bundle; `view` is the library browsing
 server.
 
 **Craft scores are a reference, not a verdict — and the page shows why.** The four
@@ -92,7 +92,7 @@ weighting of the four dimensions and watch `overall` recompute live, your blend
 beside the stored default. The dimensions themselves never move — only how they are
 combined — so you can see exactly how much the verdict depends on what *you* value.
 
-**Interface language toggle (EN / 中文).** The inspector and the read-only `view`
+**Interface language toggle (EN / 中文).** The inspector and the `view` server
 carry both English and Traditional Chinese in the page: an instant client-side
 switch that follows your browser's language on first load and remembers your
 choice. Only interface labels translate — the model's own output (transcript,

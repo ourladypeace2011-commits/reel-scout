@@ -75,7 +75,8 @@ reel-scout show <video_id>                           # 看完整拆解結果
 | `score` | 對已分析影片做 LLM 評分 |
 | `list` / `show` | 列出 / 檢視已分析影片 |
 | `inspect` | 單支影片的互動檢視 web app（播放器 + 波形 + 關鍵影格 + 逐字稿）|
-| `view` | 唯讀瀏覽伺服器（影片庫列表）|
+| `view` | 影片庫列表伺服器（可加星號／分組／備註）|
+| `note` / `group` | 從命令列標記用途、分組、星號 |
 | `export` | 匯出分析（JSON / CSV / 向量庫 / 自包含 bundle）|
 | `config` | 設定與環境檢查 |
 

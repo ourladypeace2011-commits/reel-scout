@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import List
+from typing import Any, Dict, List
 
 from . import __version__, batch, config, mcp_install, skill_install
 
@@ -106,8 +106,35 @@ def main(argv: List[str] = None) -> None:
     p_show = sub.add_parser("show", help="Show full analysis for a video")
     p_show.add_argument("video_id", help="Video ID")
 
+    # --- note / group (user annotations) ---
+    p_note = sub.add_parser(
+        "note", help="Annotate a video: what it's for, which group, starred or not")
+    p_note.add_argument("video", help="URL, video id, or unique id prefix")
+    p_note.add_argument("--text", help="Set the note (empty string clears it)")
+    p_note.add_argument("--group", help="File under this group (name or id)")
+    p_note.add_argument("--new-group", action="store_true",
+                        help="Create --group if it does not exist yet")
+    p_note.add_argument("--no-group", action="store_true", help="Remove the grouping")
+    star = p_note.add_mutually_exclusive_group()
+    star.add_argument("--star", dest="star", action="store_true", default=None)
+    star.add_argument("--unstar", dest="star", action="store_false")
+    p_note.add_argument("--json", action="store_true", help="Print the annotation as JSON")
+
+    p_group = sub.add_parser("group", help="Manage the annotation groups")
+    p_group_sub = p_group.add_subparsers(dest="group_cmd")
+    p_group_sub.add_parser("list", help="List groups and how many videos each holds")
+    p_group_add = p_group_sub.add_parser("add", help="Create a group")
+    p_group_add.add_argument("name")
+    p_group_rename = p_group_sub.add_parser("rename", help="Rename a group")
+    p_group_rename.add_argument("group", help="Group id or current name")
+    p_group_rename.add_argument("name", help="New name")
+    p_group_rm = p_group_sub.add_parser(
+        "rm", help="Delete a group (notes and stars are kept, only the filing is cleared)")
+    p_group_rm.add_argument("group", help="Group id or name")
+
     # --- view ---
-    p_view = sub.add_parser("view", help="Serve a read-only local viewer of analyzed videos")
+    p_view = sub.add_parser(
+        "view", help="Serve the local library viewer (analysis read-only; notes save)")
     p_view.add_argument("--host", default="127.0.0.1")
     p_view.add_argument("--port", type=int, default=0, help="0 = pick a free port")
     p_view.add_argument("--no-open", dest="open_browser", action="store_false",
@@ -316,6 +343,8 @@ def main(argv: List[str] = None) -> None:
         "patterns": _cmd_patterns,
         "inspire": _cmd_inspire,
         "track": _cmd_track,
+        "note": _cmd_note,
+        "group": _cmd_group,
         "research": _cmd_research,
         "db": _cmd_db,
         "config": _cmd_config,
@@ -1105,6 +1134,72 @@ def _cmd_track(args) -> None:
                 ensure_ascii=False, indent=2))
         else:
             print(track_mod.format_track(perf, cmp))
+    finally:
+        conn.close()
+
+
+def _fmt_annotation(ann: Dict[str, Any]) -> str:
+    star = "★" if ann.get("starred") else "☆"
+    group = ann.get("group_name") or "—"
+    note = ann.get("note") or ""
+    return "%s  [%s]  %s" % (star, group, note) if note else "%s  [%s]" % (star, group)
+
+
+def _cmd_note(args) -> None:
+    from . import annotate as ann_mod, db
+
+    config.ensure_dirs()
+    conn = db.init_db()
+    try:
+        video_id = ann_mod.resolve_video(conn, args.video)
+        ann = ann_mod.set_annotation(
+            conn, video_id,
+            note=args.text,
+            group=args.group,
+            starred=args.star,
+            clear_group=args.no_group,
+            create_group=args.new_group,
+        )
+        if args.json:
+            print(json.dumps(ann, ensure_ascii=False, indent=2))
+        else:
+            print("%s  %s" % (video_id, _fmt_annotation(ann)))
+    except ann_mod.AnnotateError as exc:
+        raise SystemExit("error: %s" % exc)
+    finally:
+        conn.close()
+
+
+def _cmd_group(args) -> None:
+    from . import annotate as ann_mod, db
+
+    config.ensure_dirs()
+    conn = db.init_db()
+    try:
+        cmd = getattr(args, "group_cmd", None) or "list"
+        if cmd == "list":
+            groups = ann_mod.list_groups(conn)
+            if not groups:
+                print("no groups yet — reel-scout group add <name>")
+            for g in groups:
+                print("%4d  %-30s %d" % (g["id"], g["name"], g["video_count"]))
+            return
+        if cmd == "add":
+            g = ann_mod.add_group(conn, args.name)
+            print("added %d  %s" % (g["id"], g["name"]))
+            return
+        if cmd == "rename":
+            gid = ann_mod.resolve_group(conn, args.group)
+            g = ann_mod.rename_group(conn, int(gid), args.name)
+            print("renamed %d  %s" % (g["id"], g["name"]))
+            return
+        if cmd == "rm":
+            gid = ann_mod.resolve_group(conn, args.group)
+            ann_mod.remove_group(conn, int(gid))
+            print("removed %s — notes and stars kept" % args.group)
+            return
+    except ann_mod.AnnotateError as exc:
+        raise SystemExit("error: %s" % exc)
     finally:
         conn.close()
 

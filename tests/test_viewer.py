@@ -244,8 +244,13 @@ def test_viewer_i18n_chrome_bilingual_and_model_content_untouched(temp_db):
         assert '"zh"' in idx and '"en"' in idx
         assert "解構分析" in idx and "工藝評分" in idx          # zh chrome in boot
         assert "applyLang" in idx and "localStorage.setItem('rs_lang'" in idx
-        assert 'data-i18n="sub"' in idx                        # subtitle is chrome
+        # The subtitle is chrome, and the served list says so with its own key:
+        # that page writes annotations back, so it must not claim "read-only".
+        assert 'data-i18n="subLive"' in idx
+        assert 'data-i18n="sub"' not in idx
         assert "Fried Chicken" in idx                          # model title untranslated
+        # The take-home export has no server to write to and keeps the old key.
+        assert 'data-i18n="sub"' in viewer.render_bundle(conn)
 
         page = viewer.render_video_page(conn, vid)
         for key in ("decoded", "craftScores", "keyframes", "transcript",
