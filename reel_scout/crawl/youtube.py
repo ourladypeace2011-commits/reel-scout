@@ -86,8 +86,23 @@ class YouTubeCrawler(BaseCrawler):
         # down with it. --no-abort-on-error does not prevent that: it governs
         # whether yt-dlp continues to the *next* playlist entry, not whether one
         # entry survives a partial failure.
+        # Prefer anything that is not AV1. YouTube now serves AV1 as "best" for
+        # a growing share of uploads, and the clip then downloads, analyzes and
+        # scores perfectly while the app's own player shows a blank rectangle:
+        # AV1 needs a hardware decoder Apple silicon only gained in M3, and
+        # Safari will not decode it in software. Chrome will, so the same
+        # library plays for one person and not the next — which is exactly the
+        # shape of bug nobody reports correctly.
+        #
+        # VP9 is left alone: it is the common case here and it plays.
+        #
+        # The chain degrades rather than fails. A video offered only in AV1
+        # still downloads on the last two selectors — a blank player is worse
+        # than nothing, but refusing to ingest at all is worse than both.
         dl_cmd = ytdlp.cmd(
-            "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "-f", "bestvideo[height<=720][vcodec!*=av01]+bestaudio/"
+                  "best[height<=720][vcodec!*=av01]/"
+                  "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "--merge-output-format", "mp4",
             "-o", output_template,
             "--no-playlist",
