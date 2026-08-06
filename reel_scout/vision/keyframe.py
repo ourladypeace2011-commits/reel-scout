@@ -4,6 +4,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import List
 
@@ -222,6 +223,19 @@ def extract_keyframes(
             video_path, output_dir, video_id, max_frames,
             resolution, start_sec, end_sec,
         )
+        # A clip can legitimately have no cuts to find — a lecture, a livestream,
+        # one person talking for four hours. Scene detection then returns nothing
+        # (or overruns and returns nothing), and leaving it there produced a video
+        # with zero keyframes, therefore no visual layer and no score, sitting in
+        # the library at status "transcribed" looking merely unfinished. Interval
+        # sampling seeks per frame instead of decoding through, so it costs the
+        # same whatever the duration; topping up here is what makes "some frames"
+        # the guaranteed floor.
+        if len(frames) < max_frames:
+            frames = _top_up_with_interval(
+                frames, video_path, output_dir, video_id, max_frames,
+                resolution, start_sec, end_sec,
+            )
     elif strategy == "interval":
         frames = _extract_interval(
             video_path, output_dir, video_id, max_frames,
@@ -238,19 +252,10 @@ def extract_keyframes(
             resolution, start_sec, end_sec,
         )
         if len(frames) < max_frames:
-            # Fill gaps with interval frames
-            interval_frames = _extract_interval(
-                video_path, output_dir, video_id, max_frames - len(frames),
+            frames = _top_up_with_interval(
+                frames, video_path, output_dir, video_id, max_frames,
                 resolution, start_sec, end_sec,
             )
-            # Deduplicate by checking timestamp proximity (within 1s)
-            existing_ts = {f.timestamp_sec for f in frames}
-            for f in interval_frames:
-                if not any(abs(f.timestamp_sec - t) < 1.0 for t in existing_ts):
-                    frames.append(f)
-                    existing_ts.add(f.timestamp_sec)
-                if len(frames) >= max_frames:
-                    break
     else:
         raise ValueError(f"Unknown keyframe strategy: {strategy}")
 
@@ -288,11 +293,64 @@ def _get_duration(video_path: str) -> float:
         return 60.0  # fallback for short videos
 
 
+def _top_up_with_interval(
+    frames: List[KeyframeInfo], video_path: str, output_dir: str, video_id: str,
+    max_frames: int, resolution: int, start_sec: float, end_sec: float,
+) -> List[KeyframeInfo]:
+    """Fill a short frame set out to `max_frames` with evenly spaced samples.
+
+    Lifted verbatim out of the `hybrid` branch so `scene` can use it too. Scene
+    detection was the only strategy that could come back empty and stay empty,
+    which is the one case where having no frames at all is the outcome.
+    """
+    interval_frames = _extract_interval(
+        video_path, output_dir, video_id, max_frames - len(frames),
+        resolution, start_sec, end_sec,
+    )
+    # Deduplicate by checking timestamp proximity (within 1s)
+    existing_ts = {f.timestamp_sec for f in frames}
+    for f in interval_frames:
+        if not any(abs(f.timestamp_sec - t) < 1.0 for t in existing_ts):
+            frames.append(f)
+            existing_ts.add(f.timestamp_sec)
+        if len(frames) >= max_frames:
+            break
+    return frames
+
+
+def scene_timeout(duration_sec: float) -> int:
+    """How long scene detection may run, as a function of the clip.
+
+    Scene detection has to decode until it finds cuts; `-frames:v` only exits
+    early once enough of them exist. A fixed 120s was fine while every clip was
+    a reel, and impossible for a 4-hour livestream of one person talking to
+    camera — almost no cuts, so the early exit never fires and ffmpeg decodes
+    the whole file against a budget it cannot meet.
+
+    Capped at 300s, and the cap is chosen from evidence rather than taste: a
+    52-minute edited talk finished scene detection inside the OLD 120s budget
+    and returned 38 cuts. `-frames:v` exits as soon as there are enough, so a
+    clip that has cuts finds them early; only a clip that has none decodes on
+    and on. 300s is therefore 2.5x what the one long clip we measured needed,
+    while halving what a cut-less clip wastes before giving up.
+
+    Capping at all is safe only because a timeout is no longer fatal:
+    extraction falls through to interval sampling, which seeks per frame and
+    costs the same at any duration.
+    """
+    return int(min(max(120.0, duration_sec * 0.2), 300.0))
+
+
 def _extract_scene(
     video_path: str, output_dir: str, video_id: str, max_frames: int,
     resolution: int = 0, start_sec: float = 0.0, end_sec: float = 0.0,
 ) -> List[KeyframeInfo]:
-    """Extract keyframes using ffmpeg scene change detection."""
+    """Extract keyframes using ffmpeg scene change detection.
+
+    Returns [] rather than raising when ffmpeg overruns: a clip with no usable
+    cuts is a normal thing to meet, not an error, and the caller has a cheaper
+    strategy to fall back on.
+    """
     pattern = os.path.join(output_dir, f"{video_id}_scene_%03d.jpg")
     vf = "select='gt(scene,0.3)',showinfo"
     scale = _scale_vf(resolution)
@@ -308,9 +366,15 @@ def _extract_scene(
         "-y",
         pattern,
     ]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=scene_timeout(_get_duration(video_path)),
+        )
+    except subprocess.TimeoutExpired:
+        print("  Scene detection timed out — falling back to interval sampling",
+              file=sys.stderr)
+        return []
 
     # Parse timestamps from showinfo output (in stderr). With input seeking (-ss
     # before -i) ffmpeg resets pts to 0 at the seek point, so add start_sec back to
