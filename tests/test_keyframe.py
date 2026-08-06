@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from reel_scout.vision.keyframe import (
     _scale_vf,
     _seek_args,
     auto_frame_budget,
+    scene_timeout,
 )
 from reel_scout import config
 
@@ -119,14 +121,19 @@ class TestAutoFrameBudget:
         assert auto_frame_budget(0) == 30
         assert auto_frame_budget(-5) == 30
 
+    # _extract_interval is stubbed because scene returning [] is now a fallback
+    # trigger, not a dead end — without this the budget assertion below would
+    # shell out to a real ffmpeg, which CI does not have.
     @patch("reel_scout.vision.keyframe._get_duration", return_value=900.0)
     @patch("reel_scout.vision.keyframe._extract_scene", return_value=[])
+    @patch("reel_scout.vision.keyframe._extract_interval", return_value=[])
     @patch("reel_scout.vision.keyframe._ensure_first_last", side_effect=lambda *a, **k: a[3])
     @patch("reel_scout.vision.keyframe.os.makedirs")
     def test_auto_budget_clamped_to_frame_cap(
         self,
         mock_makedirs: MagicMock,
         mock_ensure: MagicMock,
+        mock_interval: MagicMock,
         mock_scene: MagicMock,
         mock_duration: MagicMock,
     ) -> None:
@@ -298,3 +305,91 @@ class TestMotionStrategy:
         cmd = first_call_args[0][0]
         vf_arg = cmd[cmd.index("-vf") + 1]
         assert "mpdecimate" in vf_arg
+
+
+def test_scene_timeout_scales_with_duration_and_stays_capped():
+    """A fixed 120s made long clips unextractable, and it failed quietly.
+
+    Scene detection decodes until it has found enough cuts; `-frames:v` is what
+    exits early. A 4h livestream of one person talking has almost no cuts, so
+    the early exit never fires and ffmpeg runs the whole file against a budget
+    it cannot meet. Measured: a 251-minute clip timed out at 120s, left zero
+    keyframes, and sat in the library at status "transcribed" — indistinguishable
+    from merely unfinished.
+
+    The 300s cap comes from evidence, not taste: a 52-minute edited talk finished
+    scene detection inside the old 120s budget and returned 38 cuts. `-frames:v`
+    exits once there are enough, so a clip with cuts finds them early and only a
+    cut-less one decodes on. Capping at all is safe only because a timeout is no
+    longer fatal.
+    """
+    assert scene_timeout(8) == 120           # a reel keeps the old floor
+    assert scene_timeout(1200) == 240        # 20 min earns more
+    assert scene_timeout(15035) == 300       # 4 h is capped, not proportional
+    assert scene_timeout(0) == 120           # unknown duration degrades to the floor
+
+
+def test_scene_detect_timeout_falls_back_to_interval_instead_of_zero_frames(
+        tmp_path, monkeypatch):
+    """Zero keyframes is the one outcome worth engineering away.
+
+    No frames means no visual layer, therefore no craft score — the difference
+    between reel-scout and a transcript dump. Interval sampling seeks per frame
+    rather than decoding through, so it costs the same at any duration; there is
+    no reason for a scene-detection overrun to end the run.
+    """
+    from reel_scout.vision import keyframe
+
+    def _timeout_on_scene_detect(cmd, **kw):
+        if any("showinfo" in str(a) for a in cmd):
+            raise subprocess.TimeoutExpired(cmd, 120)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(keyframe.subprocess, "run", _timeout_on_scene_detect)
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 15035.0)
+    monkeypatch.setattr(
+        keyframe, "_extract_interval",
+        lambda video_path, output_dir, video_id, n, *a, **kw: [
+            KeyframeInfo(frame_index=i, timestamp_sec=float(i * 100),
+                         file_path="%s/f%d.jpg" % (output_dir, i),
+                         strategy="interval")
+            for i in range(n)])
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+
+    frames = keyframe.extract_keyframes(
+        str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+        strategy="scene", max_frames=5)
+
+    assert len(frames) == 5, "a scene-detect timeout must not end with zero frames"
+    assert all(f.strategy == "interval" for f in frames)
+
+
+def test_partial_scene_result_is_not_padded_with_interval(tmp_path, monkeypatch):
+    """Falling back is for nothing at all, not for "fewer than budget".
+
+    The first cut of this used `len(frames) < max_frames`, which quietly turned
+    `scene` into `hybrid` for every clip whose cut count came in under budget:
+    real scene frames diluted with arbitrary ones, and an extra VLM call for
+    each padded frame. `hybrid` already exists for people who want that. The
+    defect was zero frames, so zero is the only case that changes.
+    """
+    from reel_scout.vision import keyframe
+
+    scene_frames = [KeyframeInfo(frame_index=i, timestamp_sec=float(i),
+                                 file_path="%s/s%d.jpg" % (tmp_path, i),
+                                 strategy="scene")
+                    for i in range(2)]
+    called = []
+
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 900.0)
+    monkeypatch.setattr(keyframe, "_extract_scene", lambda *a, **kw: scene_frames)
+    monkeypatch.setattr(keyframe, "_extract_interval",
+                        lambda *a, **kw: called.append(1) or [])
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+
+    frames = keyframe.extract_keyframes(
+        str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+        strategy="scene", max_frames=10)
+
+    assert not called, "two real cuts under a budget of ten must not be padded"
+    assert len(frames) == 2
