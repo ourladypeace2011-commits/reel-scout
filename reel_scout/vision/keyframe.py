@@ -223,15 +223,19 @@ def extract_keyframes(
             video_path, output_dir, video_id, max_frames,
             resolution, start_sec, end_sec,
         )
-        # A clip can legitimately have no cuts to find — a lecture, a livestream,
-        # one person talking for four hours. Scene detection then returns nothing
-        # (or overruns and returns nothing), and leaving it there produced a video
-        # with zero keyframes, therefore no visual layer and no score, sitting in
-        # the library at status "transcribed" looking merely unfinished. Interval
-        # sampling seeks per frame instead of decoding through, so it costs the
-        # same whatever the duration; topping up here is what makes "some frames"
-        # the guaranteed floor.
-        if len(frames) < max_frames:
+        # Only when there is nothing at all. A clip can legitimately have no cuts
+        # to find — a lecture, a livestream, one person talking for four hours —
+        # and leaving that at zero keyframes cost the whole visual layer and the
+        # score, while the video sat at status "transcribed" looking merely
+        # unfinished. Interval sampling seeks per frame instead of decoding
+        # through, so it costs the same whatever the duration.
+        #
+        # Deliberately NOT `len(frames) < max_frames`: that was the first cut and
+        # it padded every clip whose cut count came in under budget, diluting real
+        # scene frames with arbitrary ones and buying extra VLM calls for all of
+        # them. `hybrid` exists for people who want that; `scene` should not
+        # silently become it. The defect here is zero, so zero is what is fixed.
+        if not frames:
             frames = _top_up_with_interval(
                 frames, video_path, output_dir, video_id, max_frames,
                 resolution, start_sec, end_sec,

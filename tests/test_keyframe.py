@@ -121,14 +121,19 @@ class TestAutoFrameBudget:
         assert auto_frame_budget(0) == 30
         assert auto_frame_budget(-5) == 30
 
+    # _extract_interval is stubbed because scene returning [] is now a fallback
+    # trigger, not a dead end — without this the budget assertion below would
+    # shell out to a real ffmpeg, which CI does not have.
     @patch("reel_scout.vision.keyframe._get_duration", return_value=900.0)
     @patch("reel_scout.vision.keyframe._extract_scene", return_value=[])
+    @patch("reel_scout.vision.keyframe._extract_interval", return_value=[])
     @patch("reel_scout.vision.keyframe._ensure_first_last", side_effect=lambda *a, **k: a[3])
     @patch("reel_scout.vision.keyframe.os.makedirs")
     def test_auto_budget_clamped_to_frame_cap(
         self,
         mock_makedirs: MagicMock,
         mock_ensure: MagicMock,
+        mock_interval: MagicMock,
         mock_scene: MagicMock,
         mock_duration: MagicMock,
     ) -> None:
@@ -357,3 +362,34 @@ def test_scene_detect_timeout_falls_back_to_interval_instead_of_zero_frames(
 
     assert len(frames) == 5, "a scene-detect timeout must not end with zero frames"
     assert all(f.strategy == "interval" for f in frames)
+
+
+def test_partial_scene_result_is_not_padded_with_interval(tmp_path, monkeypatch):
+    """Falling back is for nothing at all, not for "fewer than budget".
+
+    The first cut of this used `len(frames) < max_frames`, which quietly turned
+    `scene` into `hybrid` for every clip whose cut count came in under budget:
+    real scene frames diluted with arbitrary ones, and an extra VLM call for
+    each padded frame. `hybrid` already exists for people who want that. The
+    defect was zero frames, so zero is the only case that changes.
+    """
+    from reel_scout.vision import keyframe
+
+    scene_frames = [KeyframeInfo(frame_index=i, timestamp_sec=float(i),
+                                 file_path="%s/s%d.jpg" % (tmp_path, i),
+                                 strategy="scene")
+                    for i in range(2)]
+    called = []
+
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 900.0)
+    monkeypatch.setattr(keyframe, "_extract_scene", lambda *a, **kw: scene_frames)
+    monkeypatch.setattr(keyframe, "_extract_interval",
+                        lambda *a, **kw: called.append(1) or [])
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+
+    frames = keyframe.extract_keyframes(
+        str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+        strategy="scene", max_frames=10)
+
+    assert not called, "two real cuts under a budget of ten must not be padded"
+    assert len(frames) == 2
