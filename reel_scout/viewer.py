@@ -305,6 +305,21 @@ select.groupsel:focus,input.noteinput:focus,#newgroup:focus{outline:0;
 .libtools button:hover{color:var(--ink);border-color:var(--ink-2)}
 .savehint{color:var(--quiet);letter-spacing:.08em}
 .savehint.bad{color:var(--warn,#b45309)}
+/* The same word, said next to the row you are actually looking at. The global
+   hint sits in the header, so on a long library it reports into empty space.
+   The note input is width:100%, so the hint needs a slot of its own or it is
+   in the markup and never on screen — which is how the first cut of this
+   shipped. The slot is reserved whether or not it holds text, so a save does
+   not reflow the row under the cursor; an error is allowed to grow past it,
+   because an error you cannot read is not worth the stability.
+   Flex goes on a wrapper, never on the <td>: a table cell made display:flex
+   drops out of the table layout algorithm and the column collapses. */
+.notewrap{display:flex;align-items:center;gap:8px}
+.notewrap input.noteinput{flex:1 1 auto;width:auto;min-width:0}
+.rowhint{flex:0 0 auto;min-width:4.5em;text-align:right;
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--quiet);white-space:nowrap}
+.rowhint.bad{color:var(--warn,#b45309)}
 """
 
 _STYLE = theme.stylesheet(_COMPONENTS)
@@ -366,11 +381,22 @@ ANNOTATE_JS = r"""
   if(!table) return;
   var hint=document.getElementById('savehint');
   var hintTimer;
-  function say(msg, bad){
-    if(!hint) return;
-    hint.textContent=msg; hint.className='savehint'+(bad?' bad':'');
-    clearTimeout(hintTimer);
-    hintTimer=setTimeout(function(){ hint.textContent=''; }, bad?6000:1500);
+  var rowTimers={};
+  function say(msg, bad, tr){
+    if(hint){
+      hint.textContent=msg; hint.className='savehint'+(bad?' bad':'');
+      clearTimeout(hintTimer);
+      hintTimer=setTimeout(function(){ hint.textContent=''; }, bad?6000:1500);
+    }
+    // Also report into the row itself. The header hint is out of view once the
+    // library is longer than a screen, which made a working save look like
+    // nothing happened — the reason this was mistaken for a missing button.
+    if(!tr) return;
+    var rh=tr.querySelector('.rowhint'); if(!rh) return;
+    var vid=tr.getAttribute('data-vid');
+    rh.textContent=msg; rh.className='rowhint'+(bad?' bad':'');
+    clearTimeout(rowTimers[vid]);
+    rowTimers[vid]=setTimeout(function(){ rh.textContent=''; }, bad?6000:1500);
   }
   function t(key, fallback){
     try{
@@ -380,7 +406,7 @@ ANNOTATE_JS = r"""
       return d[key]||fallback;
     }catch(e){ return fallback; }
   }
-  function post(url, body, ok){
+  function post(url, body, ok, tr){
     var x=new XMLHttpRequest();
     x.open('POST', url, true);
     x.setRequestHeader('Content-Type','application/json');
@@ -389,7 +415,7 @@ ANNOTATE_JS = r"""
       if(x.status>=200 && x.status<300){
         var data={};
         try{ data=JSON.parse(x.responseText); }catch(e){}
-        say(t('saved','saved'));
+        say(t('saved','saved'), false, tr);
         if(ok) ok(data);
       } else {
         // Loudly, and without clearing the field: the text the user typed is
@@ -397,7 +423,7 @@ ANNOTATE_JS = r"""
         var msg=t('saveFailed','not saved');
         try{ msg += ' — ' + (JSON.parse(x.responseText).error||x.status); }
         catch(e){ msg += ' — ' + x.status; }
-        say(msg, true);
+        say(msg, true, tr);
       }
     };
     x.send(JSON.stringify(body||{}));
@@ -418,7 +444,7 @@ ANNOTATE_JS = r"""
     btn.setAttribute('aria-pressed', next?'true':'false');
     btn.querySelector('.glyph').textContent = next?'★':'☆';
     applyFilter();
-    post('/api/annotate/'+tr.getAttribute('data-vid'), {starred: next});
+    post('/api/annotate/'+tr.getAttribute('data-vid'), {starred: next}, null, tr);
   });
   // --- group select ---
   table.addEventListener('change', function(ev){
@@ -426,10 +452,17 @@ ANNOTATE_JS = r"""
     if(!sel.classList || !sel.classList.contains('groupsel')) return;
     var tr=rowId(sel); if(!tr) return;
     post('/api/annotate/'+tr.getAttribute('data-vid'),
-         {group_id: sel.value ? parseInt(sel.value,10) : null});
+         {group_id: sel.value ? parseInt(sel.value,10) : null}, null, tr);
   });
   // --- note, debounced ---
-  var timers={};
+  // `saved` holds the value the server has confirmed for a row. It is what
+  // makes "is this row dirty?" answerable at any moment — including while a
+  // request is still in flight, which a pending-timer check cannot see.
+  var timers={}, saved={};
+  function sendNote(vid, tr, inp){
+    var v=inp.value;   // capture: inp.value can change before the reply lands
+    post('/api/annotate/'+vid, {note: v}, function(){ saved[vid]=v; }, tr);
+  }
   table.addEventListener('input', function(ev){
     var inp=ev.target;
     if(!inp.classList || !inp.classList.contains('noteinput')) return;
@@ -437,7 +470,8 @@ ANNOTATE_JS = r"""
     var vid=tr.getAttribute('data-vid');
     clearTimeout(timers[vid]);
     timers[vid]=setTimeout(function(){
-      post('/api/annotate/'+vid, {note: inp.value});
+      timers[vid]=0;
+      sendNote(vid, tr, inp);
     }, 600);
   });
   // Typing then closing the tab inside the debounce window would lose the note.
@@ -446,7 +480,39 @@ ANNOTATE_JS = r"""
     if(!inp.classList || !inp.classList.contains('noteinput')) return;
     var tr=rowId(inp); if(!tr) return;
     var vid=tr.getAttribute('data-vid');
-    if(timers[vid]){ clearTimeout(timers[vid]); post('/api/annotate/'+vid, {note: inp.value}); }
+    if(timers[vid]){
+      clearTimeout(timers[vid]); timers[vid]=0;
+      sendNote(vid, tr, inp);
+    }
+  });
+  // focusout only covers leaving the field. Closing the tab or the window
+  // fires neither it nor the pending timer, so a note typed in the last 600ms
+  // was simply lost — and silently, which is the worst version of it. A beacon
+  // is the one send the browser still delivers while the page is going away;
+  // an XHR at this point is not guaranteed to leave. The server reads the body
+  // as JSON regardless of Content-Type, so this needs no endpoint of its own.
+  //
+  // The test is "does this row differ from what the server confirmed", not "is
+  // a timer pending". A pending timer is only one of the three ways a row can
+  // be dirty at this moment: the debounce may have already fired and left a
+  // request in flight, or an earlier save may have failed outright. Checking
+  // the value covers all three; checking the timer covered one and quietly
+  // dropped the others.
+  window.addEventListener('pagehide', function(){
+    if(!navigator.sendBeacon) return;
+    [].forEach.call(table.querySelectorAll('.noteinput'), function(inp){
+      var tr=rowId(inp); if(!tr) return;
+      var vid=tr.getAttribute('data-vid');
+      // defaultValue is what the server rendered, so an untouched row is clean
+      // without needing to seed `saved` for all of them up front.
+      var known=(vid in saved) ? saved[vid] : inp.defaultValue;
+      if(inp.value===known) return;
+      if(timers[vid]){ clearTimeout(timers[vid]); timers[vid]=0; }
+      try{
+        navigator.sendBeacon('/api/annotate/'+vid,
+          new Blob([JSON.stringify({note: inp.value})], {type:'application/json'}));
+      }catch(e){}
+    });
   });
   // --- header star = filter ---
   var filter=document.getElementById('starfilter');
@@ -560,9 +626,11 @@ def render_library_table(views: List[Dict[str, Any]], href: Callable[[str], str]
             '<td class="c-title"><a href="%s">%s</a>%s</td>'
             '<td class="c-group"><select class="groupsel">%s</select></td>'
             '<td class="c-score">%s</td>'
-            '<td class="c-note"><input type="text" class="noteinput" value="%s" '
+            '<td class="c-note"><div class="notewrap">'
+            '<input type="text" class="noteinput" value="%s" '
             'maxlength="%d" data-i18n-ph="notePlaceholder" '
-            'placeholder="what is this one for?"></td>'
+            'placeholder="what is this one for?">'
+            '<span class="rowhint" aria-live="polite"></span></div></td>'
             '</tr>' % (
                 _e(vid), 1 if starred else 0,
                 "true" if starred else "false", "★" if starred else "☆",

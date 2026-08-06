@@ -369,3 +369,99 @@ def test_the_rendered_baseline_matches_the_english_dict(temp_db):
     finally:
         conn.close()
     assert i18n.STRINGS["en"]["noTranscriptNote"] in page
+
+
+def test_row_carries_its_own_save_hint_and_flushes_pending_note_on_pagehide(temp_db):
+    """Feedback has to land where the eye is, and a pending note has to survive.
+
+    Two defects reported together, and they were the same defect wearing two
+    hats: a save that works but looks like nothing happened. The header hint is
+    one element at the top, so on a library longer than a screen it reports into
+    off-screen space — which is why the annotation layer read as "is there
+    supposed to be a submit button?". And `focusout` only fires when you leave
+    the field; closing the tab inside the 600ms debounce fired neither it nor
+    the timer, so the last note typed was dropped without a word.
+    """
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    _seed(conn)
+    page = viewer.render_index_page(conn)
+    conn.close()
+
+    # every row can report next to itself, not only into the header
+    assert page.count('class="rowhint"') == page.count('class="noteinput"')
+    assert 'say(t(\'saved\',\'saved\'), false, tr)' in page
+
+    # The hint needs a slot or it is in the markup and never on screen — the
+    # note input is width:100%. That slot comes from a flex wrapper INSIDE the
+    # cell: putting display:flex on the <td> itself drops it out of the table
+    # layout algorithm and collapses the column, which is what the first two
+    # attempts at this did. Both halves are pinned because the markup alone
+    # looks correct while rendering to nothing.
+    assert page.count('class="notewrap"') == page.count('class="noteinput"')
+    assert '.notewrap{display:flex' in page
+    assert '.c-note{display:flex' not in page
+
+    # the pending note leaves even when the page is going away
+    assert "addEventListener('pagehide'" in page
+    assert "navigator.sendBeacon('/api/annotate/'" in page
+
+    # ...and the flush asks "does this row differ from what the server
+    # confirmed", not "is a timer pending". A pending timer is one of three
+    # ways a row can be dirty at that moment — the debounce may have fired
+    # and left a request in flight, or an earlier save may have failed. The
+    # first cut keyed on the timer and silently dropped the other two, so the
+    # value comparison is the part worth pinning.
+    assert "var known=(vid in saved) ? saved[vid] : inp.defaultValue" in page
+    assert "if(inp.value===known) return" in page
+    assert "for(var vid in timers)" not in page
+
+
+def test_annotate_accepts_a_beacon_shaped_post(temp_db):
+    """`sendBeacon` is the contract the pagehide flush rests on — pin it.
+
+    A beacon sends a Blob, and the browser sets the Content-Type from it; the
+    JS is free to pick one, but nothing stops that from drifting. The endpoint
+    reads the body as JSON regardless, which is exactly why no separate beacon
+    route was needed. If someone later makes the handler require
+    `application/json`, notes typed in the last 600ms before a tab close start
+    disappearing again — silently, and only for that one case. This test is the
+    thing that would catch it.
+
+    Drives `make_inspect_server`, which is what `reel-scout view` actually
+    serves — `viewer.make_server` is the read-only GET-only server kept for
+    tests, and pointing a write test at it only proves that it has no do_POST.
+    """
+    import threading
+    import urllib.request
+
+    from reel_scout.inspector import make_inspect_server
+
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    vid = _seed(conn)
+    conn.close()
+
+    httpd = make_inspect_server(port=0)
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        for ctype in ("application/json", "text/plain;charset=UTF-8", None):
+            body = json.dumps({"note": "beacon %s" % ctype}).encode()
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/annotate/%s" % (port, vid),
+                data=body, method="POST")
+            if ctype:
+                req.add_header("Content-Type", ctype)
+            assert urllib.request.urlopen(req, timeout=5).status == 200
+
+            check = sqlite3.connect(temp_db)
+            check.row_factory = sqlite3.Row
+            got = check.execute(
+                "SELECT note FROM video_annotations WHERE video_id=?", (vid,)).fetchone()
+            check.close()
+            assert got["note"] == "beacon %s" % ctype
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
