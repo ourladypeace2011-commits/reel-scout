@@ -9,6 +9,7 @@ import sys
 from typing import Any, Dict, List
 
 from . import __version__, batch, config, mcp_install, skill_install
+from .utils import paths as media_paths
 
 
 def _force_utf8_stdio() -> None:
@@ -309,6 +310,12 @@ def main(argv: List[str] = None) -> None:
     p_db_sub.add_parser("stats", help="Show database stats")
     p_db_sub.add_parser("reset", help="Reset database (destructive)")
     p_db_sub.add_parser("migrate", help="Run pending migrations")
+    p_db_norm = p_db_sub.add_parser(
+        "normalize-paths",
+        help="Rewrite stored media paths to the portable data-root-relative form",
+    )
+    p_db_norm.add_argument("--dry-run", action="store_true",
+                           help="Report what would change without writing")
     p_db_backfill = p_db_sub.add_parser(
         "backfill-text",
         help="Recover on-screen text from frames a pre-fix VLM backend described",
@@ -555,7 +562,7 @@ def _cmd_transcribe(args) -> None:
         transcriber = get_transcriber(args.backend)
         for v in videos:
             print(f"Transcribing: {v['title'] or v['id']}")
-            result = transcriber.transcribe(v["file_path"])
+            result = transcriber.transcribe(media_paths.resolve_media_path(v["file_path"]))
             segments_data = [
                 {"start": s.start, "end": s.end, "text": s.text,
                  "confidence": s.confidence}
@@ -1274,6 +1281,20 @@ def _cmd_db(args) -> None:
         config.ensure_dirs()
         conn = db.init_db()
         print("Migrations complete.")
+        conn.close()
+
+    elif args.db_command == "normalize-paths":
+        config.ensure_dirs()
+        conn = db.init_db()
+        changed, missing = db.normalize_media_paths(conn, dry_run=args.dry_run)
+        verb = "Would rewrite" if args.dry_run else "Rewrote"
+        print("%s %d path(s) to the portable form." % (verb, changed))
+        if missing:
+            print("Left %d unresolvable path(s) untouched:" % len(missing))
+            for row in missing[:20]:
+                print("  %s" % row)
+            if len(missing) > 20:
+                print("  ... and %d more" % (len(missing) - 20))
         conn.close()
 
     elif args.db_command == "backfill-text":

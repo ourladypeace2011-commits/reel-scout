@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from .. import config, db, ingest
 from ..export.json_export import export_csv, export_json
+from ..utils import paths as media_paths
 
 # `ingest` is imported at module level, against the deferred-import convention the
 # handlers below follow, because `_enum()` reads its whitelists while `list_tools()`
@@ -621,7 +622,7 @@ def _tool_show_video(args: Dict[str, Any]) -> Dict[str, Any]:
                 "uploader": video["uploader"],
                 "duration_sec": video["duration_sec"],
                 "status": video["status"],
-                "file_path": video["file_path"],
+                "file_path": media_paths.resolve_media_path(video["file_path"]),
             },
             "transcript": None,
             "analysis": None,
@@ -664,7 +665,7 @@ def _tool_show_video(args: Dict[str, Any]) -> Dict[str, Any]:
                     "id": keyframe["id"],
                     "frame_index": keyframe["frame_index"],
                     "timestamp_sec": keyframe["timestamp_sec"],
-                    "file_path": keyframe["file_path"],
+                    "file_path": media_paths.resolve_media_path(keyframe["file_path"]),
                     "strategy": keyframe["strategy"],
                     # Without these the agent can write a visual layer and then
                     # have no way to read it back: over MCP `show_video` is the
