@@ -309,6 +309,13 @@ def main(argv: List[str] = None) -> None:
     p_db_sub.add_parser("stats", help="Show database stats")
     p_db_sub.add_parser("reset", help="Reset database (destructive)")
     p_db_sub.add_parser("migrate", help="Run pending migrations")
+    p_db_backfill = p_db_sub.add_parser(
+        "backfill-text",
+        help="Recover on-screen text from frames a pre-fix VLM backend described",
+    )
+    p_db_backfill.add_argument(
+        "--dry-run", action="store_true", help="Report what would be filled; write nothing"
+    )
 
     # --- config ---
     p_config = sub.add_parser("config", help="Configuration")
@@ -1269,8 +1276,29 @@ def _cmd_db(args) -> None:
         print("Migrations complete.")
         conn.close()
 
+    elif args.db_command == "backfill-text":
+        from . import ocr
+
+        config.ensure_dirs()
+        conn = db.init_db()
+        try:
+            r = ocr.backfill_from_descriptions(conn, dry_run=args.dry_run)
+        finally:
+            conn.close()
+        verb = "would fill" if args.dry_run else "filled"
+        print("Scanned %d frame(s) with a description and no on-screen text."
+              % r["scanned"])
+        print("  %s %d frame(s) across %d video(s)"
+              % (verb, r["filled"], r["videos"]))
+        if args.dry_run:
+            print("  would write %d caption(s) — re-run without --dry-run to apply"
+                  % r["captions"])
+        else:
+            print("  wrote %d caption(s) for %d video(s)"
+                  % (r["captions"], r["videos_with_captions"]))
+
     else:
-        print("Use: reel-scout db {stats|reset|migrate}")
+        print("Use: reel-scout db {stats|reset|migrate|backfill-text}")
 
 
 def _probe_cmd(cmd, timeout=5):

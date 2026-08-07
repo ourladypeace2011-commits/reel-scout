@@ -76,3 +76,75 @@ def collect_captions(
                 {"timestamp_sec": r["timestamp_sec"], "text": text, "engine": src}
             )
     return captions
+
+
+def backfill_from_descriptions(conn, dry_run=False):
+    # type: (db.sqlite3.Connection, bool) -> Dict[str, int]
+    """Recover the L3.5 layer for frames a pre-fix backend described.
+
+    Until `vision.parse` existed both backends dropped the model's answer into
+    `description` and left `text_in_frame` at "", so `collect_captions` had
+    nothing to return and `ocr_captions` stayed empty for the whole corpus. The
+    text was never lost -- it is in the prose -- so this re-reads it rather than
+    paying for another VLM pass over every keyframe.
+
+    Pure DB work: no model, no network, no video files. Only rows whose
+    `text_in_frame` is already empty are touched, so a real read from a fixed
+    backend is never overwritten, and captions are rewritten per video by
+    `save_ocr_captions`, which replaces rather than appends -- both make this
+    safe to run twice.
+    """
+    from .vision.parse import text_from_prose
+
+    rows = conn.execute(
+        """SELECT vd.keyframe_id, vd.description, k.video_id
+             FROM vision_descriptions vd
+             JOIN keyframes k ON k.id = vd.keyframe_id
+            WHERE vd.description IS NOT NULL AND TRIM(vd.description) != ''
+              AND (vd.text_in_frame IS NULL OR TRIM(vd.text_in_frame) = '')"""
+    ).fetchall()
+
+    touched_videos = set()
+    filled = 0
+    for r in rows:
+        text = text_from_prose(r["description"])
+        if not text:
+            continue
+        filled += 1
+        touched_videos.add(r["video_id"])
+        if not dry_run:
+            conn.execute(
+                "UPDATE vision_descriptions SET text_in_frame = ? WHERE keyframe_id = ?",
+                (text, r["keyframe_id"]),
+            )
+    if not dry_run:
+        conn.commit()
+
+    # A dry run stops here: rebuilding captions means reading back the column it
+    # deliberately did not write. Every filled frame becomes one caption, so
+    # `filled` is the count it would have produced.
+    if dry_run:
+        return {
+            "scanned": len(rows),
+            "filled": filled,
+            "videos": len(touched_videos),
+            "captions": filled,
+            "videos_with_captions": len(touched_videos),
+        }
+
+    captions = 0
+    videos_with_captions = 0
+    for vid in sorted(touched_videos):
+        caps = collect_captions(conn, vid, engine="vlm")
+        if caps:
+            db.save_ocr_captions(conn, vid, caps)
+            captions += len(caps)
+            videos_with_captions += 1
+
+    return {
+        "scanned": len(rows),
+        "filled": filled,
+        "videos": len(touched_videos),
+        "captions": captions,
+        "videos_with_captions": videos_with_captions,
+    }

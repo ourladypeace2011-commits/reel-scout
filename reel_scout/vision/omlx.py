@@ -7,6 +7,7 @@ import urllib.request
 from typing import Optional
 
 from .base import BaseVLM, FrameDescription
+from .parse import parse_frame_reply
 from .prompts import get_frame_prompt
 
 
@@ -66,4 +67,7 @@ class OmlxVLM(BaseVLM):
             result = json.loads(resp.read().decode("utf-8"))
 
         text = result["choices"][0]["message"]["content"]
-        return FrameDescription(description=text)
+        prose, in_frame, objects = parse_frame_reply(text)
+        return FrameDescription(
+            description=prose, text_in_frame=in_frame, objects=objects
+        )
