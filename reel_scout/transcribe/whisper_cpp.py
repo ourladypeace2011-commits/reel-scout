@@ -5,6 +5,8 @@ import os
 import subprocess
 import tempfile
 
+from ..utils.stderr import tail_stderr
+
 from .base import BaseTranscriber, Segment, TranscriptResult
 
 
@@ -35,7 +37,7 @@ class WhisperCppTranscriber(BaseTranscriber):
                 capture_output=True, text=True, timeout=300,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"whisper.cpp failed: {result.stderr[:500]}")
+                raise RuntimeError(f"whisper.cpp failed: {tail_stderr(result.stderr)}")
 
             # Parse JSON output
             data = json.loads(result.stdout)

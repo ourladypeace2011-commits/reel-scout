@@ -16,6 +16,7 @@ from ..transcribe.base import TranscriptResult
 from ..vision import get_vlm
 from ..vision.keyframe import extract_keyframes
 from .merger import merge_analysis
+from ..utils import paths as media_paths
 
 # Platform tag for videos that were registered from a local file instead of
 # crawled from a URL. This is the "platform门一关" insurance path: when yt-dlp /
@@ -167,7 +168,7 @@ def _process_single(
 ) -> str:
     # Step 1: Download (skip if already exists)
     existing = db.get_video_by_url(conn, url)
-    if existing and existing["file_path"] and os.path.exists(existing["file_path"]):
+    if existing and existing["file_path"] and media_paths.exists(existing["file_path"]):
         video_id = existing["id"]
         print("  Skipping download (already exists)")
     elif _is_local_source(url):
@@ -195,7 +196,7 @@ def _process_single(
         )
 
     video = db.get_video(conn, video_id)
-    file_path = video["file_path"]
+    file_path = media_paths.resolve_media_path(video["file_path"])
 
     # Step 2: Transcribe
     if not options.skip_transcribe:
