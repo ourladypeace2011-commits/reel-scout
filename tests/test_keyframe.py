@@ -393,3 +393,139 @@ def test_partial_scene_result_is_not_padded_with_interval(tmp_path, monkeypatch)
 
     assert not called, "two real cuts under a budget of ten must not be padded"
     assert len(frames) == 2
+
+
+# ── near-duplicate dedupe (2026-08-10) ────────────────────────────────────────
+# The saving is frames NOT sent to the VLM, so every test here asserts both that
+# the right frames go AND that the guards hold. A dedupe that quietly re-creates
+# the sparse-timeline defect `frame_cap` exists to fix would be a regression
+# dressed up as an optimisation.
+
+def _fr(i, ts, path="/tmp/f.jpg"):
+    from reel_scout.vision.keyframe import KeyframeInfo
+    return KeyframeInfo(frame_index=i, timestamp_sec=float(ts),
+                        file_path="%s.%d" % (path, i), strategy="interval")
+
+
+def _hashes(monkeypatch, mapping):
+    """Stub frame_dhash by file_path suffix so tests state similarity directly."""
+    from reel_scout.vision import keyframe
+    monkeypatch.setattr(
+        keyframe, "frame_dhash",
+        lambda p, size=8: mapping.get(int(p.rsplit(".", 1)[1])))
+
+
+def test_dedupe_drops_identical_neighbours(monkeypatch):
+    from reel_scout.vision import keyframe
+    frames = [_fr(i, i) for i in range(8)]          # 1s apart
+    _hashes(monkeypatch, {i: 0b0000 for i in range(8)})   # all identical
+    kept, dropped = keyframe.dedupe_near_duplicates(frames, distance=4,
+                                                    max_gap_sec=120, min_keep=4)
+    assert dropped == 4
+    assert len(kept) == 4                            # floor holds
+    assert kept[0].timestamp_sec == 0.0              # first kept
+    assert kept[-1].timestamp_sec == 7.0             # last kept
+    assert [f.frame_index for f in kept] == [0, 1, 2, 3]  # re-indexed
+
+
+def test_dedupe_keeps_visually_different_frames(monkeypatch):
+    from reel_scout.vision import keyframe
+    frames = [_fr(i, i) for i in range(6)]
+    # (1 << 8i) - 1 → 0, 255, 65535 … consecutive values differ by 8 set bits,
+    # comfortably past the distance-4 threshold. (An earlier draft used
+    # 1 << 8i, which differs by only TWO bits — inside the threshold, so the
+    # frames were correctly treated as duplicates and the test was wrong.)
+    _hashes(monkeypatch, {i: (1 << (8 * i)) - 1 for i in range(6)})
+    kept, dropped = keyframe.dedupe_near_duplicates(frames, distance=4,
+                                                    max_gap_sec=120, min_keep=2)
+    assert dropped == 0
+    assert len(kept) == 6
+
+
+def test_dedupe_never_drops_across_a_wide_time_gap(monkeypatch):
+    """Two identical frames seventeen minutes apart are information, not noise —
+    this is the guard that stops dedupe re-creating the sparse-timeline bug."""
+    from reel_scout.vision import keyframe
+    frames = [_fr(0, 0), _fr(1, 1020), _fr(2, 2040), _fr(3, 3060),
+              _fr(4, 4080), _fr(5, 5100)]            # 17 min apart
+    _hashes(monkeypatch, {i: 0 for i in range(6)})   # all identical
+    kept, dropped = keyframe.dedupe_near_duplicates(frames, distance=4,
+                                                    max_gap_sec=120, min_keep=2)
+    assert dropped == 0, "wide-gap frames must survive even when identical"
+    assert len(kept) == 6
+
+
+def test_dedupe_unhashable_frame_is_never_dropped(monkeypatch):
+    """A frame ffmpeg could not read must be kept, not silently discarded."""
+    from reel_scout.vision import keyframe
+    frames = [_fr(i, i) for i in range(6)]
+    h = {i: 0 for i in range(6)}
+    h[3] = None                                      # unreadable
+    _hashes(monkeypatch, h)
+    kept, dropped = keyframe.dedupe_near_duplicates(frames, distance=4,
+                                                    max_gap_sec=120, min_keep=2)
+    assert any(f.timestamp_sec == 3.0 for f in kept)
+
+
+def test_dedupe_is_a_noop_below_the_floor(monkeypatch):
+    from reel_scout.vision import keyframe
+    frames = [_fr(i, i) for i in range(3)]
+    _hashes(monkeypatch, {i: 0 for i in range(3)})
+    kept, dropped = keyframe.dedupe_near_duplicates(frames, distance=4,
+                                                    max_gap_sec=120, min_keep=4)
+    assert (dropped, len(kept)) == (0, 3)
+
+
+def test_extract_keyframes_does_not_top_up_after_dedupe(tmp_path, monkeypatch):
+    """The whole point: removed frames are NOT replaced, so the returned count
+    comes in UNDER the cap. A top-up would spend the same and hide the saving."""
+    from reel_scout.vision import keyframe
+    frames = [_fr(i, i) for i in range(10)]
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 10.0)
+    monkeypatch.setattr(keyframe, "_extract_interval", lambda *a, **kw: list(frames))
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+    monkeypatch.setattr(keyframe.config, "KEYFRAME_DEDUPE", True)
+    _hashes(monkeypatch, {i: 0 for i in range(10)})
+
+    out = keyframe.extract_keyframes(str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+                                     strategy="interval", max_frames=10)
+    assert len(out) < 10, "dedupe must reduce spend, not reshuffle within it"
+    assert len(out) == config.KEYFRAME_DEDUPE_MIN
+
+
+def test_extract_keyframes_dedupe_can_be_switched_off(tmp_path, monkeypatch):
+    from reel_scout.vision import keyframe
+    frames = [_fr(i, i) for i in range(10)]
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 10.0)
+    monkeypatch.setattr(keyframe, "_extract_interval", lambda *a, **kw: list(frames))
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+    monkeypatch.setattr(keyframe.config, "KEYFRAME_DEDUPE", False)
+    _hashes(monkeypatch, {i: 0 for i in range(10)})
+
+    out = keyframe.extract_keyframes(str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+                                     strategy="interval", max_frames=10)
+    assert len(out) == 10
+
+
+def test_frame_dhash_returns_none_on_short_ffmpeg_output(monkeypatch):
+    """Truncated ffmpeg output must yield None, not a hash built from garbage."""
+    from reel_scout.vision import keyframe
+    monkeypatch.setattr(keyframe.subprocess, "run",
+                        lambda *a, **kw: MagicMock(stdout=b"\x00" * 9))
+    assert keyframe.frame_dhash("/tmp/x.jpg") is None
+
+
+def test_frame_dhash_builds_a_64_bit_hash(monkeypatch):
+    """9x8 grayscale in, 64 comparison bits out — the shape the distance
+    threshold is calibrated against."""
+    from reel_scout.vision import keyframe
+    # Each row ascends left-to-right, so every comparison is "not greater" = 0.
+    row = bytes(range(9))
+    monkeypatch.setattr(keyframe.subprocess, "run",
+                        lambda *a, **kw: MagicMock(stdout=row * 8))
+    assert keyframe.frame_dhash("/tmp/x.jpg") == 0
+    # Descending rows flip every bit.
+    rev = bytes(reversed(range(9)))
+    monkeypatch.setattr(keyframe.subprocess, "run",
+                        lambda *a, **kw: MagicMock(stdout=rev * 8))
+    assert keyframe.frame_dhash("/tmp/x.jpg") == (1 << 64) - 1

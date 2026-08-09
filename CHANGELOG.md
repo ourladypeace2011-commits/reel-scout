@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Added
+- **Near-duplicate keyframes are dropped instead of described.** `frame_cap`
+  decides how many frames a clip may spend; this decides how many it actually
+  needs. They fix different defects — the cap fixed "long clips sampled too
+  sparsely", this fixes "consecutive samples look identical and each one still
+  costs a local VLM call".
+
+  **Nothing is topped up.** A version that backfilled to the cap would cost
+  exactly what it cost before, and would also hide whether the pass works at
+  all, because the count would always equal the cap. Coming in under budget is
+  the point.
+
+  Two guards stop this re-creating the sparse-timeline defect the cap exists to
+  fix. A frame is only ever dropped while the previous **kept** frame is within
+  `KEYFRAME_DEDUPE_MAX_GAP_SEC` (120s) — two identical-looking frames seventeen
+  minutes apart are information ("nothing changed for seventeen minutes"), two
+  seconds apart is noise. And `KEYFRAME_DEDUPE_MIN` (4) floors the count so a
+  static short clip cannot collapse to a single frame. First and last are never
+  dropped, and a frame ffmpeg cannot read is never dropped either.
+
+  The hash is a 64-bit dHash computed **through ffmpeg**, not Pillow: ffmpeg is
+  already a hard requirement, Pillow is only in the `ocr` extra, and a dedupe
+  pass is not worth promoting an optional dependency to a core one. One extra
+  ffmpeg call per frame, milliseconds each, against the seconds a VLM call
+  costs — removing one frame pays for the whole pass.
+
+  **Measured on the real 100-video library: 1,202 → 1,148 frames, 54 VLM calls
+  avoided (4.5%), 22 videos affected.** That is deliberately modest. The default
+  distance threshold (4 of 64 bits) only removes frames a person would call the
+  same frame, and this library is mostly fast-cut short-form, where consecutive
+  keyframes genuinely differ. The one long clip in the set (52 min) dropped 6 of
+  40. Expect the saving to grow with long static footage — lectures, interviews,
+  streams — which is exactly where a flat cap wastes the most.
+
+  Off with `KEYFRAME_DEDUPE=0`; `KEYFRAME_DEDUPE_DISTANCE` loosens or tightens
+  it. `reel-scout config` prints all four values.
+
 ### Changed
 - **`show_video` no longer hands an agent a whole transcript timeline it did not
   ask for.** Measured across the 101-video library with the same serializer both
