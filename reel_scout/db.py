@@ -5,7 +5,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import config
 
@@ -1215,3 +1215,48 @@ def set_annotation(conn: sqlite3.Connection, video_id: str,
     conn.commit()
     row = get_annotation(conn, video_id)
     return dict(row) if row else {}
+
+
+def normalize_media_paths(
+    conn: sqlite3.Connection, dry_run: bool = False
+) -> "Tuple[int, List[str]]":
+    """Rewrite stored media paths into the portable data-root-relative form.
+
+    A live database holds both shapes — ``./data/videos/x.mp4`` written when the
+    process ran from the repo root, and absolute paths written from anywhere
+    else. Reads resolve both, so this is cleanup rather than a prerequisite.
+
+    Rows whose path resolves to nothing are counted and returned but never
+    rewritten: rewriting a path we cannot verify turns a recoverable row into a
+    confidently wrong one.
+    """
+    from .utils import paths as media_paths
+
+    changed = 0
+    missing: List[str] = []
+
+    for table in ("videos", "keyframes"):
+        rows = conn.execute(
+            "SELECT id, file_path FROM %s "  # noqa: S608 - table names are hardcoded
+            "WHERE file_path IS NOT NULL AND file_path != ''" % table
+        ).fetchall()
+        for row in rows:
+            stored = row["file_path"]
+            if not media_paths.exists(stored):
+                missing.append("%s:%s -> %s" % (table, row["id"], stored))
+                continue
+            portable = media_paths.to_storage_path(
+                media_paths.resolve_media_path(stored)
+            )
+            if portable == stored:
+                continue
+            changed += 1
+            if not dry_run:
+                conn.execute(
+                    "UPDATE %s SET file_path = ? WHERE id = ?" % table,  # noqa: S608
+                    (portable, row["id"]),
+                )
+
+    if not dry_run:
+        conn.commit()
+    return changed, missing

@@ -169,6 +169,20 @@ SCORE_DIMENSIONS = tuple(SCORE_WEIGHTS)
 PANNS_MODEL_PATH = os.getenv("PANNS_MODEL_PATH", "")
 AUDIO_WINDOW_SEC = float(os.getenv("AUDIO_WINDOW_SEC", "2.0"))
 AUDIO_HOP_SEC = float(os.getenv("AUDIO_HOP_SEC", "1.0"))
+#: Confidence a window's dominant class must clear to be recorded. Music and
+#: speech sustain across a whole clip and clear this easily.
+AUDIO_MIN_CONF = float(os.getenv("AUDIO_MIN_CONF", "0.3"))
+#: Separate, lower floor for discrete events (a door, a whoosh, a coin drop).
+#: They are brief, so a 2-second window is mostly *other* sound and AudioSet
+#: scores them far lower than a sustained bed — measured on three reels tagged
+#: "SFX", every effect in them landed between 0.06 and 0.23 while the music
+#: behind them sat at 0.8+. Holding effects to the dominant-class threshold
+#: therefore keeps the beds and discards exactly what someone studying sound
+#: design is looking for.
+AUDIO_EVENT_MIN_CONF = float(os.getenv("AUDIO_EVENT_MIN_CONF", "0.12"))
+#: How many classes per window to consider. argmax alone loses the case where a
+#: window is "Music 0.469, Sound effect 0.400" — the second one is the finding.
+AUDIO_TOP_K = int(os.getenv("AUDIO_TOP_K", "3"))
 
 # --- OCR / on-screen text (§4F, L3.5) ---
 # Collect burned-in on-screen captions with timestamps as an extra signal layer

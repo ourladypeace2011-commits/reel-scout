@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import annotate, config, db, i18n, theme
 from .viewer import build_video_view
+from .utils import paths as media_paths
 
 _SCORE_DIMS = [
     ("overall", "Overall"),
@@ -69,15 +70,16 @@ def _fmt_ts(sec: Any) -> str:
 # --- Media file resolution ---
 
 def resolve_video_file(file_path: Optional[str]) -> Optional[str]:
-    """Absolute path to a video's file, or None. Stored path is cwd-relative by
-    default; fall back to VIDEOS_DIR by basename if it has moved."""
+    """Absolute path to a video's file, or None.
+
+    Delegates to the shared resolver so this no longer depends on the working
+    directory: ``os.path.abspath`` used to anchor a stored ``./data/videos/x``
+    to whatever cwd the process started in, and the VIDEOS_DIR fallback was
+    itself cwd-relative, so both candidates missed from anywhere but the repo
+    root."""
     if not file_path:
         return None
-    for path in (os.path.abspath(file_path),
-                 os.path.join(config.VIDEOS_DIR, os.path.basename(file_path))):
-        if os.path.exists(path):
-            return path
-    return None
+    return media_paths.resolve_media_path(file_path) if media_paths.exists(file_path) else None
 
 
 # --- Data assembly ---

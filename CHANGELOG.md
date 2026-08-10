@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed
+- **A stored media path stopped meaning anything once you changed directory.**
+  `DATA_DIR` defaults to `./data` — relative to whatever cwd the process started
+  in — so rows written from the repo root recorded `./data/videos/x.mp4` while
+  rows written anywhere else recorded an absolute path. A live database holds
+  both. `analyze` checked the stored path with a bare `os.path.exists()`, so run
+  from any other directory it concluded the file was missing and downloaded it
+  again; `resolve_video_file` looked cwd-relative first and then fell back to
+  `VIDEOS_DIR`, which is itself cwd-relative, so both of its candidates missed
+  too. Resolution is now anchored to the data root and tries every shape a
+  stored path can have — portable, legacy, cwd, and basename-under-`VIDEOS_DIR`
+  for files that moved between data directories. `reel-scout db normalize-paths
+  [--dry-run]` rewrites existing rows to the portable form; rows whose path
+  cannot be resolved are reported and deliberately left alone, because
+  rewriting a path you cannot verify turns a recoverable row into a confidently
+  wrong one.
+- **ffmpeg and whisper.cpp still reported the wrong end of stderr.** `crawl/ytdlp.py`
+  fixed this for yt-dlp, but the audio-extraction and whisper.cpp paths kept a
+  blind `stderr[:300]` / `[:500]`. Both print banners and progress first and the
+  cause last, so the head shown was reliably the part carrying no information —
+  an ffmpeg permission error sat past the cut behind five lines of build
+  configuration. Both now report error-looking lines, falling back to the tail.
+
 ### Added
 - **Near-duplicate keyframes are dropped instead of described.** `frame_cap`
   decides how many frames a clip may spend; this decides how many it actually

@@ -30,6 +30,54 @@ _MUSIC_LABELS = {
     "Rock music",
     "Electronic music",
     "Jazz",
+    # Instruments the local corpus actually surfaced while being filed as
+    # "sound_effect". Each one was a scored reel's backing track, not its sound
+    # design, and left in place they drown the layer they were polluting.
+    "Percussion",
+    "Marimba",
+    "Xylophone",
+    "Vibraphone",
+    "Glockenspiel",
+    "Sitar",
+    "Banjo",
+    "Mandolin",
+    "Ukulele",
+    "Harp",
+    "Cello",
+    "Double bass",
+    "Viola",
+    "Fiddle",
+    "Organ",
+    "Electric piano",
+    "Synthesizer",
+    "Sampler",
+    "Harmonica",
+    "Accordion",
+    "Bass drum",
+    "Snare drum",
+    "Hi-hat",
+    "Cymbal",
+    "Tambourine",
+    "Drum machine",
+    "Drum and bass",
+    "Bass (instrument role)",
+    "Plucked string instrument",
+    "Brass instrument",
+    "Wind instrument, woodwind instrument",
+    "String section",
+    "Orchestra",
+    "Choir",
+    "Chant",
+    "Melody",
+    "Theme music",
+    "Soundtrack music",
+    "Background music",
+    "Ambient music",
+    "Techno",
+    "House music",
+    "Dance music",
+    "Trance music",
+    "Drum roll",
 }  # type: Set[str]
 
 _SPEECH_LABELS = {
@@ -56,16 +104,36 @@ _APPLAUSE_LABELS = {
 
 
 def _classify_label(label: str) -> str:
-    """Map AudioSet label to simplified event_type."""
-    if label in _MUSIC_LABELS:
+    """Map AudioSet label to simplified event_type.
+
+    Matching is on the full label *and* on its first comma-separated segment.
+    AudioSet names many classes as compounds — "Violin, fiddle", "Marimba,
+    xylophone", "Bass drum, kick drum" — and exact-match alone sent every one of
+    them to "sound_effect", so a string quartet came back looking like sound
+    design. The sets below carry the head terms; the segment split covers the
+    rest of each compound.
+    """
+    for candidate in (label, label.split(",")[0].strip()):
+        if candidate in _MUSIC_LABELS:
+            return "music"
+        if candidate in _SPEECH_LABELS:
+            return "speech"
+        if candidate in _SILENCE_LABELS:
+            return "silence"
+        if candidate in _APPLAUSE_LABELS:
+            return "applause"
+    # AudioSet's music branch is wide — every genre and region gets its own
+    # class ("Traditional music", "Christian music", "Music of Africa"). Naming
+    # them individually is a losing game; they all say "music" on the tin.
+    if "music" in label.lower():
         return "music"
-    if label in _SPEECH_LABELS:
-        return "speech"
-    if label in _SILENCE_LABELS:
-        return "silence"
-    if label in _APPLAUSE_LABELS:
-        return "applause"
     return "sound_effect"
+
+
+#: Event types that sustain across a clip rather than happening at a moment.
+#: They win argmax almost every window, which is why a discrete effect needs its
+#: own, lower floor to survive at all.
+_SUSTAINED_TYPES = frozenset(("music", "speech", "silence"))
 
 
 def _read_wav_samples(wav_path: str) -> Tuple[List[float], int]:
@@ -102,12 +170,33 @@ class PannsAnalyzer(BaseAudioAnalyzer):
         model_path: str = "",
         window_sec: float = 2.0,
         hop_sec: float = 1.0,
+        min_conf: float = 0.3,
+        event_min_conf: float = 0.12,
+        top_k: int = 3,
     ):
         self._model_path = model_path
         self._window_sec = window_sec
         self._hop_sec = hop_sec
+        self._min_conf = min_conf
+        self._event_min_conf = event_min_conf
+        self._top_k = top_k
         self._session = None  # type: object
         self._labels = None  # type: List[str] | None
+
+    def _label_at(self, idx: int) -> str:
+        if self._labels and idx < len(self._labels):
+            return self._labels[idx]
+        return "unknown"
+
+    @staticmethod
+    def _event(label: str, start_sec: float, end_sec: float, conf: float) -> AudioEvent:
+        return AudioEvent(
+            event_type=_classify_label(label),
+            label=label,
+            start_sec=round(start_sec, 1),
+            end_sec=round(end_sec, 1),
+            confidence=round(conf, 3),
+        )
 
     def _ensure_model(self) -> None:
         if self._session is not None:
@@ -163,25 +252,37 @@ class PannsAnalyzer(BaseAudioAnalyzer):
 
             # output[0] shape: (1, 527) — probabilities for each class
             probs = output[0][0]
-            top_idx = int(np.argmax(probs))
-            top_conf = float(probs[top_idx])
+            ranked = np.argsort(probs)[::-1][: max(1, self._top_k)]
 
-            if top_conf > 0.3:  # confidence threshold
-                label = (
-                    self._labels[top_idx]  # type: ignore[index]
-                    if self._labels and top_idx < len(self._labels)
-                    else "unknown"
-                )
-                event_type = _classify_label(label)
-                events.append(
-                    AudioEvent(
-                        event_type=event_type,
-                        label=label,
-                        start_sec=round(start_sec, 1),
-                        end_sec=round(end_sec, 1),
-                        confidence=round(top_conf, 3),
-                    )
-                )
+            # The dominant class carries the coverage timeline (is this stretch
+            # music, speech, or silence). Unchanged behaviour.
+            top_idx = int(ranked[0])
+            top_conf = float(probs[top_idx])
+            emitted = None
+            if top_conf > self._min_conf:
+                emitted = self._label_at(top_idx)
+                events.append(self._event(emitted, start_sec, end_sec, top_conf))
+
+            # A discrete effect rarely wins the window it happens in — the bed
+            # behind it scores higher — so scan the top-k on its own, lower
+            # floor. Without this the layer reports "Music, Music, Music" for a
+            # reel whose whole point is its sound design.
+            #
+            # This starts at rank 0, not rank 1: on a reel that is *only* sound
+            # design the effect often does win its window, just at 0.2 rather
+            # than 0.3, and skipping the winner dropped exactly those — the
+            # clips the layer most needed to describe came back empty. `emitted`
+            # keeps it from being recorded twice when it cleared both floors.
+            for idx in ranked:
+                conf = float(probs[int(idx)])
+                if conf < self._event_min_conf:
+                    continue
+                label = self._label_at(int(idx))
+                if label == emitted:
+                    continue
+                if _classify_label(label) in _SUSTAINED_TYPES:
+                    continue
+                events.append(self._event(label, start_sec, end_sec, conf))
 
             pos += hop_samples
 
