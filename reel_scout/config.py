@@ -183,6 +183,12 @@ AUDIO_EVENT_MIN_CONF = float(os.getenv("AUDIO_EVENT_MIN_CONF", "0.12"))
 #: How many classes per window to consider. argmax alone loses the case where a
 #: window is "Music 0.469, Sound effect 0.400" — the second one is the finding.
 AUDIO_TOP_K = int(os.getenv("AUDIO_TOP_K", "3"))
+#: How many discrete sound events the merge prompt may list individually. Beds
+#: (speech/music/silence) are always folded into a coverage percentage instead —
+#: at one row per second of runtime they were the whole problem. Past this count
+#: the timeline truncates but the per-label inventory is still printed, so
+#: "which effects does this video use" survives even when the timings do not.
+AUDIO_MERGE_MAX_EVENTS = int(os.getenv("AUDIO_MERGE_MAX_EVENTS", "40"))
 
 # --- OCR / on-screen text (§4F, L3.5) ---
 # Collect burned-in on-screen captions with timestamps as an extra signal layer
