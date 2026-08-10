@@ -575,3 +575,107 @@ def test_show_video_reads_back_the_score_with_its_origin(temp_db, tmp_path):
 def test_show_video_score_is_none_before_anything_scores_it(temp_db, tmp_path):
     vid = _seed_frames(temp_db, tmp_path, frames=1)
     assert _parse_result(tools.call_tool("show_video", {"video_id": vid}))["score"] is None
+
+
+# ── show_video payload budget (2026-08-08) ────────────────────────────────────
+# Measured on the live 101-video library, same serializer both sides:
+#   before  total 1,098,903 tok   p50 3,305   p90 8,467   max 288,359
+#   after   total   428,460 tok   p50 2,959   p90 4,459   max  50,596
+# The max case is a 4h clip with 5,808 transcript segments. The guards below are
+# what produced that. Each asserts the guard AND that whatever it guards is still
+# reachable — a cap that silently loses data is worse than no cap at all.
+
+def _seed_full_video(db_path, tmpdir, frames=20, segments=40):
+    """A video with transcript segments, a full analysis blob, and many frames."""
+    vid = _seed_frames(db_path, tmpdir, frames=frames)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        segs = [{"start": float(i), "end": float(i) + 1.0, "text": "seg %d" % i,
+                 "confidence": -0.1858760386370541} for i in range(segments)]
+        db.save_transcript(conn, vid, "zh", "full text here",
+                           json.dumps(segs), "large-v3", 40.0)
+        # Shapes mirror the live library: hook / style / engagement_signals are
+        # all dicts (db._extract_tag_columns calls .get on each), and each is
+        # byte-equal to its own *_json column.
+        hook = {"opening_type": "visual", "opening_text": "a hand enters",
+                "cta_type": "none", "cta_text": ""}
+        style = {"format": "talking-head", "pacing": "fast", "tone": "x"}
+        eng = {"emotion": "curiosity", "signals": ["question"]}
+        db.save_analysis(
+            conn, vid,
+            summary="s", topics_json=json.dumps(["t"]),
+            hooks_json=json.dumps(hook), style_json=json.dumps(style),
+            engagement_signals_json=json.dumps(eng),
+            full_json=json.dumps({
+                "summary": "s", "topics": ["t"], "hook": hook,
+                "style": style, "engagement_signals": eng,
+                "timeline": [{"t": 0, "what": "opens"}],
+                "content_type": "talking-head",
+                "content_structure": "hook-body-cta",
+                "measured": {"cuts_per_minute": 12.0},
+            }),
+        )
+        conn.commit()
+        return vid
+    finally:
+        conn.close()
+
+
+def test_show_video_omits_segments_but_advertises_them(temp_db, tmp_path):
+    """Segments are the single biggest block, so they must be opt-in — and the
+    payload must still say they exist, or the agent cannot know to ask."""
+    vid = _seed_full_video(temp_db, tmp_path)
+    tr = _parse_result(tools.call_tool("show_video", {"video_id": vid}))["transcript"]
+    assert "segments" not in tr
+    assert tr["has_segments"] is True
+    assert tr["segment_count"] == 40
+    assert tr["text_full"] == "full text here"  # flat text still comes free
+
+
+def test_show_video_include_segments_returns_them_rounded(temp_db, tmp_path):
+    """Opting in gets every segment back — with confidence at 3 dp, not the
+    17-digit float whisper emits."""
+    vid = _seed_full_video(temp_db, tmp_path)
+    tr = _parse_result(tools.call_tool(
+        "show_video", {"video_id": vid, "include_segments": True}))["transcript"]
+    assert len(tr["segments"]) == 40
+    assert tr["segments"][0]["confidence"] == -0.186
+    assert tr["segments"][0]["text"] == "seg 0"
+
+
+def test_show_video_full_keeps_unprojected_keys_only(temp_db, tmp_path):
+    """`full` is de-duplicated against its own projections — but the four keys
+    that live nowhere else must survive, or the saving loses data."""
+    vid = _seed_full_video(temp_db, tmp_path)
+    an = _parse_result(tools.call_tool("show_video", {"video_id": vid}))["analysis"]
+    for gone in ("summary", "topics", "style", "engagement_signals", "hook"):
+        assert gone not in an["full"], "%s is projected already" % gone
+    for kept in ("timeline", "content_type", "content_structure", "measured"):
+        assert kept in an["full"], "%s exists nowhere else" % kept
+    assert an["summary"] == "s"          # projections themselves unchanged
+    assert an["hooks"]["opening_type"] == "visual"
+
+
+def test_show_video_caps_keyframes_and_says_so(temp_db, tmp_path):
+    vid = _seed_full_video(temp_db, tmp_path, frames=20)
+    shown = _parse_result(tools.call_tool("show_video", {"video_id": vid}))
+    assert len(shown["keyframes"]) == 12
+    assert shown["keyframes_total"] == 20
+    assert shown["keyframes_truncated"] is True
+
+
+def test_show_video_max_keyframes_zero_means_no_cap(temp_db, tmp_path):
+    vid = _seed_full_video(temp_db, tmp_path, frames=20)
+    shown = _parse_result(tools.call_tool(
+        "show_video", {"video_id": vid, "max_keyframes": 0}))
+    assert len(shown["keyframes"]) == 20
+    assert shown["keyframes_truncated"] is False
+
+
+def test_show_video_bad_max_keyframes_falls_back_to_default(temp_db, tmp_path):
+    """A junk value must not take the tool down."""
+    vid = _seed_full_video(temp_db, tmp_path, frames=20)
+    shown = _parse_result(tools.call_tool(
+        "show_video", {"video_id": vid, "max_keyframes": "lots"}))
+    assert len(shown["keyframes"]) == 12

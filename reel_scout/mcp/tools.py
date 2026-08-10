@@ -77,11 +77,37 @@ def list_tools() -> List[Dict[str, Any]]:
         },
         {
             "name": "show_video",
-            "description": "Show full analysis for a specific video",
+            "description": (
+                "Show the analysis for a specific video: metadata, score, analysis "
+                "(summary/topics/hooks/style/engagement plus timeline, content_type, "
+                "content_structure and measured under `analysis.full`), the full "
+                "transcript text, and keyframe descriptions. Timed transcript "
+                "segments are NOT included by default — `has_segments` and "
+                "`segment_count` tell you they exist; pass `include_segments: true` "
+                "only when you need to cut on a timecode."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "video_id": {"type": "string"},
+                    "include_segments": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Include per-segment timings. Off by default: on long "
+                            "videos this block dwarfs everything else — measured "
+                            "2026-08-08 on a 4h clip with 5,808 segments, the whole "
+                            "response was ~288k tokens and this block was most of it."
+                        ),
+                    },
+                    "max_keyframes": {
+                        "type": "integer",
+                        "default": 12,
+                        "description": (
+                            "Cap on keyframe records returned; 0 means no cap. "
+                            "`keyframes_truncated` reports whether any were dropped."
+                        ),
+                    },
                 },
                 "required": ["video_id"],
             },
@@ -596,10 +622,47 @@ def _tool_list_videos(args: Dict[str, Any]) -> Dict[str, Any]:
         conn.close()
 
 
+# Keys inside analyses.full_json that `show_video` already ships as their own
+# top-level projection. `hook` is on this list because it was verified byte-equal
+# to hooks_json on all 99 analysed rows (2026-08-08) — not because the names look
+# alike. Everything NOT listed here (timeline / content_type / content_structure /
+# measured) exists nowhere else and must survive.
+_FULL_PROJECTED_KEYS = ("summary", "topics", "style", "engagement_signals", "hook")
+
+
+def _strip_projected(full):
+    """Drop the keys of `full_json` that are already projected beside it."""
+    if not isinstance(full, dict):
+        return full
+    return dict((k, v) for k, v in full.items() if k not in _FULL_PROJECTED_KEYS)
+
+
+def _round_confidences(segments):
+    """Round per-segment `confidence` to 3 dp.
+
+    Whisper hands back full float repr (`-0.1858760386370541`), and on a long
+    clip that is ~20 characters of noise per segment for a number nobody reads
+    past the second decimal. 3 dp keeps every ordering/threshold decision intact
+    and costs ~6% of total show_video output across the library.
+    """
+    out = []
+    for seg in segments:
+        if isinstance(seg, dict) and isinstance(seg.get("confidence"), float):
+            seg = dict(seg)
+            seg["confidence"] = round(seg["confidence"], 3)
+        out.append(seg)
+    return out
+
+
 def _tool_show_video(args: Dict[str, Any]) -> Dict[str, Any]:
     video_id = args.get("video_id", "")
     if not video_id:
         return _error_result("video_id is required")
+    include_segments = bool(args.get("include_segments", False))
+    try:
+        max_keyframes = int(args.get("max_keyframes", 12))
+    except (TypeError, ValueError):
+        max_keyframes = 12
 
     config.ensure_dirs()
     conn = db.init_db()
@@ -643,13 +706,19 @@ def _tool_show_video(args: Dict[str, Any]) -> Dict[str, Any]:
                 "model_used": score["model_used"],
             }
         if transcript is not None:
+            segments = json.loads(transcript["segments_json"] or "[]")
             payload["transcript"] = {
                 "language": transcript["language"],
                 "text_full": transcript["text_full"],
-                "segments": json.loads(transcript["segments_json"] or "[]"),
                 "whisper_model": transcript["whisper_model"],
                 "duration_sec": transcript["duration_sec"],
+                # Advertise the timed segments without paying for them. Same
+                # shape as arkiv's get_transcript `has_words` flag.
+                "has_segments": bool(segments),
+                "segment_count": len(segments),
             }
+            if include_segments:
+                payload["transcript"]["segments"] = _round_confidences(segments)
         if analysis is not None:
             payload["analysis"] = {
                 "summary": analysis["summary"],
@@ -657,9 +726,18 @@ def _tool_show_video(args: Dict[str, Any]) -> Dict[str, Any]:
                 "hooks": json.loads(analysis["hooks_json"] or "[]"),
                 "style": json.loads(analysis["style_json"] or "{}"),
                 "engagement_signals": json.loads(analysis["engagement_signals_json"] or "[]"),
-                "full": json.loads(analysis["full_json"] or "{}"),
+                # `full` keeps only what has no projection above. It used to be
+                # shipped whole, which put the same content in the payload
+                # twice; but it is NOT purely redundant — timeline /
+                # content_type / content_structure / measured live only here, so
+                # dropping it outright would lose data. Stripping just the
+                # projected keys is the version that costs nothing.
+                "full": _strip_projected(json.loads(analysis["full_json"] or "{}")),
             }
-        for keyframe in keyframes:
+        kept = keyframes if max_keyframes <= 0 else keyframes[:max_keyframes]
+        payload["keyframes_total"] = len(keyframes)
+        payload["keyframes_truncated"] = len(kept) < len(keyframes)
+        for keyframe in kept:
             payload["keyframes"].append(
                 {
                     "id": keyframe["id"],

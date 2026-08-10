@@ -118,6 +118,29 @@ KEYFRAME_MAX = int(os.getenv("KEYFRAME_MAX", "8"))
 KEYFRAME_LONG_SEC = float(os.getenv("KEYFRAME_LONG_SEC", "180"))
 KEYFRAME_PER_MIN = float(os.getenv("KEYFRAME_PER_MIN", "2"))
 KEYFRAME_MAX_LONG = int(os.getenv("KEYFRAME_MAX_LONG", "40"))
+
+# Near-duplicate keyframe removal. `frame_cap` above decides how many frames a
+# clip may spend; this decides how many it actually needs. They are different
+# defects: the cap fixes "long clips sampled too sparsely", this fixes
+# "consecutive samples look identical and each one still costs a VLM call".
+#
+# What is removed is NOT replaced. Backfilling to the cap would cost exactly as
+# much as before and would also hide whether this is working, because the count
+# would always equal the cap.
+#
+# KEYFRAME_DEDUPE_DISTANCE is a Hamming distance over a 64-bit dHash; 0 is
+# pixel-identical after downscale. 4 is deliberately tight — this should only
+# ever remove frames a person would call the same frame.
+# KEYFRAME_DEDUPE_MAX_GAP_SEC is the timeline guard: a frame is only dropped
+# when the previous KEPT frame is this close in time. Two identical-looking
+# frames seventeen minutes apart are information ("nothing changed"); two two
+# seconds apart are noise.
+# KEYFRAME_DEDUPE_MIN is the count floor, so a static short clip cannot
+# collapse to a single frame.
+KEYFRAME_DEDUPE = os.getenv("KEYFRAME_DEDUPE", "1") not in ("0", "false", "False", "")
+KEYFRAME_DEDUPE_DISTANCE = int(os.getenv("KEYFRAME_DEDUPE_DISTANCE", "4"))
+KEYFRAME_DEDUPE_MAX_GAP_SEC = float(os.getenv("KEYFRAME_DEDUPE_MAX_GAP_SEC", "120"))
+KEYFRAME_DEDUPE_MIN = int(os.getenv("KEYFRAME_DEDUPE_MIN", "4"))
 # Optional upscale (long edge px) applied to extracted keyframes so the VLM can read
 # small on-screen text (招④). 0 = keep native resolution (no scaling, default).
 KEYFRAME_RESOLUTION = int(os.getenv("KEYFRAME_RESOLUTION", "0"))
@@ -230,6 +253,9 @@ def show() -> str:
         f"KEYFRAME_LONG_SEC:    {KEYFRAME_LONG_SEC}",
         f"KEYFRAME_PER_MIN:     {KEYFRAME_PER_MIN}",
         f"KEYFRAME_MAX_LONG:    {KEYFRAME_MAX_LONG}",
+        f"KEYFRAME_DEDUPE:      {'on' if KEYFRAME_DEDUPE else 'off'}"
+        f" (dist<={KEYFRAME_DEDUPE_DISTANCE},"
+        f" gap<={KEYFRAME_DEDUPE_MAX_GAP_SEC:g}s, floor={KEYFRAME_DEDUPE_MIN})",
         f"KEYFRAME_RESOLUTION:  {KEYFRAME_RESOLUTION or '(native)'}",
         f"PANNS_MODEL_PATH:     {PANNS_MODEL_PATH or '(not set)'}",
         f"AUDIO_WINDOW_SEC:     {AUDIO_WINDOW_SEC}",

@@ -20,6 +20,115 @@ class KeyframeInfo:
     score: float = 0.0
 
 
+def frame_dhash(path: str, size: int = 8) -> "int | None":
+    """64-bit difference hash of one extracted frame, or None if unreadable.
+
+    Deliberately computed through ffmpeg rather than Pillow: ffmpeg is already a
+    hard requirement of this module, Pillow is only in the `ocr` extra, and a
+    dedupe pass is not worth promoting an optional dependency to a core one. The
+    downscale happens in ffmpeg, the bit arithmetic on stdlib bytes.
+
+    One extra ffmpeg call per frame — milliseconds each, against the seconds a
+    local VLM call costs. Removing a single frame pays for the whole pass.
+
+    Returns None rather than raising: a frame we cannot hash must never be
+    deduped away, and a broken hash must not take extraction down.
+    """
+    cmd = [
+        config.FFMPEG_BIN, "-v", "error", "-i", path,
+        # size+1 columns so each row yields `size` left-to-right comparisons.
+        "-vf", "scale=%d:%d,format=gray" % (size + 1, size),
+        "-f", "rawvideo", "-",
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=15).stdout
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if len(out) < (size + 1) * size:
+        return None
+    bits = 0
+    for row in range(size):
+        base = row * (size + 1)
+        for col in range(size):
+            bits = (bits << 1) | (1 if out[base + col] > out[base + col + 1] else 0)
+    return bits
+
+
+def hamming(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
+
+
+def dedupe_near_duplicates(
+    frames: List["KeyframeInfo"],
+    distance: int = -1,
+    max_gap_sec: float = -1.0,
+    min_keep: int = -1,
+) -> "tuple[List[KeyframeInfo], int]":
+    """Drop frames that look like the previous kept frame. Returns (kept, dropped).
+
+    **Nothing is topped up.** Each keyframe is one local VLM call, so the point
+    is to spend fewer of them; a version that backfilled to `frame_cap` would
+    cost exactly what it cost before and would also make the saving invisible,
+    because the count would always equal the cap.
+
+    Two guards keep this from re-creating the sparse-timeline defect that
+    `frame_cap` exists to fix:
+
+    * ``max_gap_sec`` — a frame is only ever dropped while the previous KEPT
+      frame is within this many seconds. Two identical-looking frames seventeen
+      minutes apart are information ("nothing changed for seventeen minutes");
+      two seconds apart is noise. Consequence: the kept set never opens a gap
+      wider than the sampler had already chosen.
+    * ``min_keep`` — a floor on the count, so a static short clip cannot
+      collapse to one frame.
+
+    First and last are never dropped: `_ensure_first_last` just guaranteed them
+    and this pass must not undo that.
+    """
+    if distance < 0:
+        distance = config.KEYFRAME_DEDUPE_DISTANCE
+    if max_gap_sec < 0:
+        max_gap_sec = config.KEYFRAME_DEDUPE_MAX_GAP_SEC
+    if min_keep < 0:
+        min_keep = config.KEYFRAME_DEDUPE_MIN
+    if len(frames) <= max(2, min_keep):
+        return frames, 0
+
+    kept = [frames[0]]
+    last_hash = frame_dhash(frames[0].file_path)
+    dropped = 0
+    # frames[-1] is excluded from the scan and appended at the end. Indexed by
+    # position, not by value: KeyframeInfo is a dataclass, so `.index(f)` would
+    # match on field equality and could return the wrong slot.
+    last_i = len(frames) - 1
+    for i in range(1, last_i):
+        f = frames[i]
+        # Floor first: once dropping another frame would breach min_keep, the
+        # rest are kept regardless of how similar they look. `remaining` counts
+        # this frame plus everything after it that is still unvisited, including
+        # the final frame appended below.
+        remaining = last_i - i + 1
+        if len(kept) + remaining <= min_keep:
+            kept.append(f)
+            last_hash = None
+            continue
+        gap = f.timestamp_sec - kept[-1].timestamp_sec
+        if gap > max_gap_sec:
+            kept.append(f)
+            last_hash = frame_dhash(f.file_path)
+            continue
+        h = frame_dhash(f.file_path)
+        if h is None or last_hash is None or hamming(h, last_hash) > distance:
+            kept.append(f)
+            last_hash = h
+        else:
+            dropped += 1
+    kept.append(frames[-1])
+    for i, f in enumerate(kept):
+        f.frame_index = i
+    return kept, dropped
+
+
 def auto_frame_budget(duration_sec: float, focused: bool = False) -> int:
     """Duration-aware keyframe budget (招②, from claude-video, MIT).
 
@@ -275,7 +384,22 @@ def extract_keyframes(
         resolution, start_sec, end_sec,
     )
 
-    return frames[:max_frames]
+    frames = frames[:max_frames]
+
+    # Last, and deliberately after the cap: `max_frames` says how many this clip
+    # is ALLOWED to spend, dedupe says how many it actually needs. Running it
+    # here means the saving is real spend avoided, not a reshuffle inside the
+    # same budget — nothing is topped up to replace what goes.
+    if config.KEYFRAME_DEDUPE:
+        frames, dropped = dedupe_near_duplicates(frames)
+        if dropped:
+            print(
+                "  keyframes: %d near-duplicates dropped, %d kept "
+                "(no top-up — that is the saving)" % (dropped, len(frames)),
+                file=sys.stderr,
+            )
+
+    return frames
 
 
 def _get_duration(video_path: str) -> float:

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+
 - **A stored media path stopped meaning anything once you changed directory.**
   `DATA_DIR` defaults to `./data` — relative to whatever cwd the process started
   in — so rows written from the repo root recorded `./data/videos/x.mp4` while
@@ -25,7 +26,61 @@
   an ffmpeg permission error sat past the cut behind five lines of build
   configuration. Both now report error-looking lines, falling back to the tail.
 
+### Notes
+
+- **Annotations live in their own tables** (`video_annotations`,
+  `annotation_groups`; schema v11), never as columns on `videos`. Everything else
+  in the database is derived from the source clip and is safe to regenerate;
+  these rows are the operator's judgement. Re-crawling, re-analyzing and
+  re-scoring rewrite the pipeline's output and cannot touch a note — there is a
+  test that holds that line. Deleting a group clears the filing and keeps every
+  note and star.
+- **The take-home export ships no annotations.** They are working state, not
+  something a reader should receive; the exported single-file HTML has no server
+  to write to and stays entirely read-only, and its strapline still says so. The
+  served list gets its own strapline, because claiming "read-only" on a page that
+  writes would be a lie.
+- **The HTTP write surface is narrow on purpose**: `POST` is accepted only on the
+  annotation endpoints, bodies over 64 KB are refused before being read, and
+  everything the pipeline produced remains read-only over HTTP.
 ### Added
+
+- **Near-duplicate keyframes are dropped instead of described.** `frame_cap`
+  decides how many frames a clip may spend; this decides how many it actually
+  needs. They fix different defects — the cap fixed "long clips sampled too
+  sparsely", this fixes "consecutive samples look identical and each one still
+  costs a local VLM call".
+
+  **Nothing is topped up.** A version that backfilled to the cap would cost
+  exactly what it cost before, and would also hide whether the pass works at
+  all, because the count would always equal the cap. Coming in under budget is
+  the point.
+
+  Two guards stop this re-creating the sparse-timeline defect the cap exists to
+  fix. A frame is only ever dropped while the previous **kept** frame is within
+  `KEYFRAME_DEDUPE_MAX_GAP_SEC` (120s) — two identical-looking frames seventeen
+  minutes apart are information ("nothing changed for seventeen minutes"), two
+  seconds apart is noise. And `KEYFRAME_DEDUPE_MIN` (4) floors the count so a
+  static short clip cannot collapse to a single frame. First and last are never
+  dropped, and a frame ffmpeg cannot read is never dropped either.
+
+  The hash is a 64-bit dHash computed **through ffmpeg**, not Pillow: ffmpeg is
+  already a hard requirement, Pillow is only in the `ocr` extra, and a dedupe
+  pass is not worth promoting an optional dependency to a core one. One extra
+  ffmpeg call per frame, milliseconds each, against the seconds a VLM call
+  costs — removing one frame pays for the whole pass.
+
+  **Measured on the real 100-video library: 1,202 → 1,148 frames, 54 VLM calls
+  avoided (4.5%), 22 videos affected.** That is deliberately modest. The default
+  distance threshold (4 of 64 bits) only removes frames a person would call the
+  same frame, and this library is mostly fast-cut short-form, where consecutive
+  keyframes genuinely differ. The one long clip in the set (52 min) dropped 6 of
+  40. Expect the saving to grow with long static footage — lectures, interviews,
+  streams — which is exactly where a flat cap wastes the most.
+
+  Off with `KEYFRAME_DEDUPE=0`; `KEYFRAME_DEDUPE_DISTANCE` loosens or tightens
+  it. `reel-scout config` prints all four values.
+
 - **Long clips get a sampling rate, not the same twelve frames a reel gets.** The
   keyframe cap was one flat number, so a 9-second reel and an 82-minute interview
   drew the same budget — the reel sampled about once a second, the interview once
@@ -58,22 +113,38 @@
   group names unique case-insensitively, notes rejected rather than truncated —
   are enforced once instead of three times, slightly differently.
 
-### Notes
-- **Annotations live in their own tables** (`video_annotations`,
-  `annotation_groups`; schema v11), never as columns on `videos`. Everything else
-  in the database is derived from the source clip and is safe to regenerate;
-  these rows are the operator's judgement. Re-crawling, re-analyzing and
-  re-scoring rewrite the pipeline's output and cannot touch a note — there is a
-  test that holds that line. Deleting a group clears the filing and keeps every
-  note and star.
-- **The take-home export ships no annotations.** They are working state, not
-  something a reader should receive; the exported single-file HTML has no server
-  to write to and stays entirely read-only, and its strapline still says so. The
-  served list gets its own strapline, because claiming "read-only" on a page that
-  writes would be a lie.
-- **The HTTP write surface is narrow on purpose**: `POST` is accepted only on the
-  annotation endpoints, bodies over 64 KB are refused before being read, and
-  everything the pipeline produced remains read-only over HTTP.
+### Changed
+
+- **`show_video` no longer hands an agent a whole transcript timeline it did not
+  ask for.** Measured across the 101-video library with the same serializer both
+  sides, one call used to return up to **288,359 tokens** — a four-hour clip whose
+  5,808 timed segments dwarfed everything else in the payload. Three things
+  changed, and each one keeps what it trims reachable rather than dropping it:
+  - **Timed `segments` are opt-in.** They are gone from the default response;
+    `has_segments` and `segment_count` take their place, so an agent still knows
+    they exist and can pass `include_segments: true` when it actually needs to cut
+    on a timecode. The flat `text_full` still comes free. When segments *are*
+    returned, `confidence` is rounded to 3 dp — whisper emits the full float repr
+    (`-0.1858760386370541`), which is roughly twenty characters of noise per
+    segment for a number nobody reads past the second decimal.
+  - **`analysis.full` is de-duplicated against its own projections.** It used to
+    ship whole while `summary` / `topics` / `hooks` / `style` /
+    `engagement_signals` sat beside it as separate keys — the same content twice.
+    Only those five keys are stripped: `timeline`, `content_type`,
+    `content_structure` and `measured` live nowhere else and still ship. (`hook`
+    was verified byte-equal to `hooks_json` on all 99 analysed rows before it went
+    on the strip list; it is not there because the name looked similar.)
+  - **`keyframes` is capped at 12 by default**, with `keyframes_total` and
+    `keyframes_truncated` reporting what happened and `max_keyframes: 0` lifting
+    the cap entirely.
+
+  Result on the same library: total **1,098,903 → 428,460** tokens, p90
+  **8,467 → 4,459**, worst case **288,359 → 50,596**.
+
+  ⚠️ **This changes a default over MCP.** Anything that read
+  `show_video(...)["transcript"]["segments"]` without passing `include_segments`
+  will now find the key absent — check `has_segments` and ask for them.
+
 
 ## 1.3.0 — 2026-07-21
 
