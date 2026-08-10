@@ -47,7 +47,12 @@ vector = ["lancedb>=0.4.0", "chromadb>=0.4.0"]
 diarize = ["speaker-align[pyannote]"]
 instagram = ["instaloader>=4.10"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
-dev = ["pytest>=7.0", "whisper-guard>=0.3.0"]
+# numpy is the audio detector's own dependency, not a test helper: `analyze()`
+# cannot run without it. Until `tests/test_audio_sfx_floor.py` the suite only
+# reached the pure-python halves of that module, so CI never needed it — and a
+# test that skips itself on CI is not a gate, it is decoration. onnxruntime
+# stays out: those tests script the session rather than load the 327 MB model.
+dev = ["pytest>=7.0", "whisper-guard>=0.3.0", "numpy>=1.21.0"]
 
 [project.scripts]
 reel-scout = "reel_scout.cli:main"
