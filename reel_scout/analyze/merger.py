@@ -6,6 +6,7 @@ from typing import Optional
 
 from .. import config, db
 from ..llm import get_llm
+from . import audio_summary
 
 _MERGE_PROMPT_TEMPLATE = """You are analyzing a short-form video. Based on the transcript and visual descriptions below, produce a structured JSON analysis.
 
@@ -193,16 +194,16 @@ def merge_analysis(
         transcript_text = "(no transcript)"
     vision_text = "\n".join(vision_texts) if vision_texts else "(no vision data)"
 
-    # Gather audio events
+    # Gather audio events. Summarised, not dumped: the detector emits one row
+    # per second of runtime, so a long clip contributed thousands of identical
+    # `speech: Speech (82%)` lines and crowded the transcript out of the window.
+    # See analyze/audio_summary.
     audio_events = db.get_audio_events(conn, video_id)
-    audio_text = "(no audio analysis)"
-    if audio_events:
-        audio_lines = []
-        for ae in audio_events:
-            audio_lines.append("[%.1fs-%.1fs] %s: %s (%.0f%%)" % (
-                ae["start_sec"], ae["end_sec"], ae["event_type"],
-                ae["label"], ae["confidence"] * 100))
-        audio_text = "\n".join(audio_lines)
+    audio_text = audio_summary.summarize(
+        audio_events,
+        video["duration_sec"] or 0.0,
+        max_events=config.AUDIO_MERGE_MAX_EVENTS,
+    )
 
     # On-screen text (§4F, L3.5): burned-in captions read by the VLM/OCR, with
     # timestamps — carries the message for low-dialogue / pure-visual reels.
