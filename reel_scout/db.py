@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -436,7 +438,28 @@ def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
 
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
+        # `REEL_SCOUT_DATA` defaults to "./data", i.e. relative to wherever the
+        # process happens to start. That default is right — a student running
+        # reel-scout inside their own project wants ./data to be *their* ./data.
+        #
+        # What is wrong is that opening a database that does not exist looks
+        # exactly like opening one that does. Run a command from the wrong
+        # directory and sqlite makes a fresh empty file, every query returns
+        # nothing, and the output ("0 targets", "no videos found") is identical
+        # to "everything is already up to date". Three separate incidents have
+        # been logged against this shape.
+        #
+        # Creating on demand stays — first run needs it, and 40-odd call sites
+        # including the whole test suite depend on it. Only the silence goes.
+        fresh = not os.path.exists(config.DB_PATH)
         conn = get_connection()
+        if fresh:
+            print(
+                "  note: created a NEW empty database at %s\n"
+                "        (expected existing data? check the cwd or set REEL_SCOUT_DATA)"
+                % os.path.abspath(config.DB_PATH),
+                file=sys.stderr,
+            )
     conn.executescript(_SCHEMA_SQL)
     # Set schema version if not exists
     cur = conn.execute("SELECT version FROM schema_version LIMIT 1")

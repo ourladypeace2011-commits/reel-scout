@@ -349,3 +349,45 @@ def test_latest_batch_can_be_found_by_source(temp_db):
         assert db.get_latest_batch(conn, source="mcp-batch")["id"] == mine
     finally:
         conn.close()
+
+
+# --- "brand new empty DB" must be audible (2026-08-15) --------------------
+#
+# REEL_SCOUT_DATA defaults to "./data", relative to wherever the process starts.
+# That default is correct for a student running inside their own project. What
+# was wrong is that opening a database that does not exist looked exactly like
+# opening one that does: sqlite makes the file, every query returns nothing, and
+# "0 targets" is indistinguishable from "already up to date". Three incidents
+# have been logged against this shape.
+
+
+def test_init_db_announces_a_freshly_created_database(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(db.config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(db.config, "DB_PATH", str(tmp_path / "reel_scout.db"))
+    monkeypatch.setattr(db.config, "ensure_dirs", lambda: None)
+
+    conn = db.init_db()
+    conn.close()
+
+    err = capsys.readouterr().err
+    assert "NEW empty database" in err
+    # The absolute path is the whole point — "./data" tells you nothing about
+    # which ./data you just made.
+    assert str(tmp_path) in err
+
+
+def test_init_db_is_silent_when_the_database_already_exists(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(db.config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(db.config, "DB_PATH", str(tmp_path / "reel_scout.db"))
+    monkeypatch.setattr(db.config, "ensure_dirs", lambda: None)
+
+    db.init_db().close()
+    capsys.readouterr()          # drop the first-run notice
+
+    db.init_db().close()
+
+    # A notice on every command would be noise, and noise gets filtered out —
+    # which is how the signal would be lost a second time.
+    assert "NEW empty database" not in capsys.readouterr().err
