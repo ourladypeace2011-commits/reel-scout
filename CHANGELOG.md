@@ -64,6 +64,38 @@
   traditional characters (皇后, 幺么); a detector that fires on clean text teaches
   people to ignore it. Validated against the library: 18/18 mixed files found,
   zero false positives.
+- **A warning that could not be printed took the transcript down with it.** The
+  mixed-script notice above carries an emoji and an em dash, and it printed
+  *before* the `INSERT`. `cli.py` reconfigures both streams to UTF-8, but it is
+  the **CLI** entry point — `mcp/server.py` never runs it, and the MCP server is
+  exactly how the Windows students reach this package, on the cp950/cp1252/cp437
+  consoles this repo has already been bitten by once. On those, the print raised
+  `UnicodeEncodeError` and the transcript was never stored: a detector that
+  deleted the data it was watching. Two independent fixes, because one of them
+  being enough is not a reason to leave the other broken. `utils.stderr.warn`
+  degrades characters the console cannot encode and never raises at its caller —
+  whether the operator sees a line is not worth the caller's work. And the scan
+  now runs before the write while the report happens after it, so even a failure
+  `warn` deliberately does not absorb costs nothing but the message.
+- **The download retry could resume a different format's partial file.** Both
+  attempts write to the same `yt_<id>.mp4.part` and yt-dlp resumes partials by
+  default, so a first selector that picked a progressive format and died
+  mid-transfer left bytes that the second attempt would extend with a Range
+  request against a *different* stream. Nothing validates that the two halves
+  came from the same video, and the result is a corrupt file that exists — which
+  the caller's `os.path.exists` check reads as success, the exact failure this
+  release is about. The fallback now passes `--no-continue`.
+- **The fallback quietly handed back a lower-quality clip.** It usually lands on
+  format 18 (360p). Silently substituting it is its own small version of
+  reporting success for the wrong result, so it now says on stderr that the
+  preferred formats produced nothing and that quality will be lower.
+- **A 200 response with no `response` field was returned as an empty string.** An
+  empty `response` is legitimate — the model produced nothing. A *missing* one
+  means the reply is not a generate response at all: an error envelope, a proxy
+  in front of Ollama, a schema that moved. Both arrived at the merger as an empty
+  result that read as a successful call. The missing case now says so. It is not
+  raised, because a compatible backend may legitimately differ and a hard error
+  would break a setup that works today.
 - **ffmpeg and whisper.cpp still reported the wrong end of stderr.** `crawl/ytdlp.py`
   fixed this for yt-dlp, but the audio-extraction and whisper.cpp paths kept a
   blind `stderr[:300]` / `[:500]`. Both print banners and progress first and the

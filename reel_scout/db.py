@@ -4,12 +4,12 @@ import hashlib
 import json
 import os
 import sqlite3
-import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config
+from .utils.stderr import warn
 
 SCHEMA_VERSION = 11
 
@@ -454,11 +454,10 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
         fresh = not os.path.exists(config.DB_PATH)
         conn = get_connection()
         if fresh:
-            print(
+            warn(
                 "  note: created a NEW empty database at %s\n"
                 "        (expected existing data? check the cwd or set REEL_SCOUT_DATA)"
-                % os.path.abspath(config.DB_PATH),
-                file=sys.stderr,
+                % os.path.abspath(config.DB_PATH)
             )
     conn.executescript(_SCHEMA_SQL)
     # Set schema version if not exists
@@ -686,16 +685,22 @@ def save_transcript(
     # would skip exactly the mislabelled files this is meant to catch. Text with
     # no Chinese in it scores (0, 0) and says nothing, so the gate bought only
     # the illusion of one.
+    #
+    # Scanned before the write, reported after it. Anything that runs between
+    # "we have the transcript" and "the transcript is stored" can lose the row,
+    # and a detector that loses the data it was watching is worse than no
+    # detector — see utils.stderr.warn for the console-encoding case that made
+    # this concrete rather than theoretical.
+    notice = None
     if text_full:
         trad, simp = scan_script_mix(text_full)
         if trad and simp:
             minor = min(trad, simp)
             total = trad + simp
-            print(
+            notice = (
                 "  ⚠️  transcript mixes traditional and simplified "
                 "(%d / %d, minority %.0f%%) — a keyword search will silently "
-                "miss whichever half it is not written in" % (trad, simp, 100.0 * minor / total),
-                file=sys.stderr,
+                "miss whichever half it is not written in" % (trad, simp, 100.0 * minor / total)
             )
     conn.execute(
         """INSERT OR REPLACE INTO transcripts
@@ -705,6 +710,8 @@ def save_transcript(
     )
     update_video_status(conn, video_id, "transcribed")
     conn.commit()
+    if notice:
+        warn(notice)
 
 
 def get_transcript(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:

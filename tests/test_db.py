@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import tempfile
+
+import pytest
 
 from reel_scout import db
 
@@ -458,5 +461,40 @@ def test_save_transcript_is_quiet_on_single_script_and_on_non_chinese(temp_db, c
         v3 = db.upsert_video(conn, platform="yt", platform_id="p3", url="u3", title="t")
         db.save_transcript(conn, v3, "en", _TRAD + _SIMP, "[]", "w", 1.0)
         assert "mixes traditional" in capsys.readouterr().err
+    finally:
+        conn.close()
+
+
+def test_a_console_that_cannot_print_the_warning_does_not_cost_the_transcript(
+    temp_db, monkeypatch
+):
+    # The warning carries an emoji and an em dash, and printing it used to happen
+    # *before* the INSERT — so on a console that could not encode it, a detector
+    # whose whole job was to report a problem instead deleted the row it was
+    # reporting on. `utils.stderr.warn` absorbs the encoding case, but it catches
+    # a deliberately bounded set; this pins the ordering itself, using a failure
+    # warn does NOT absorb. Even then the transcript has to be on disk already.
+    class _HostileConsole:
+        def write(self, s):
+            raise RuntimeError("a stream wrapper broken in a way warn() cannot absorb")
+
+        def flush(self):
+            pass
+
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        db.init_db(conn)
+        vid = db.upsert_video(conn, platform="yt", platform_id="p9", url="u9", title="t")
+        monkeypatch.setattr(sys, "stderr", _HostileConsole())
+        with pytest.raises(RuntimeError):
+            db.save_transcript(conn, vid, "zh", _TRAD + _SIMP, "[]", "w", 1.0)
+        monkeypatch.undo()
+
+        row = conn.execute(
+            "SELECT text_full FROM transcripts WHERE video_id=?", (vid,)
+        ).fetchone()
+        assert row is not None, "scan, write, then talk — talking must come last"
+        assert row["text_full"] == _TRAD + _SIMP
     finally:
         conn.close()

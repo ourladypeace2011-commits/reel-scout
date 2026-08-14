@@ -193,3 +193,23 @@ def test_download_still_raises_when_every_format_fails(
     assert rec.media_attempts == 2, "exactly one retry, not an unbounded loop"
     # No media -> still no point spending a request on captions.
     assert not [c for c in rec.calls if "--skip-download" in c]
+
+
+def test_retry_does_not_resume_the_previous_format_partial(
+    tmp_path, monkeypatch, no_rate_limit
+):
+    # Both attempts write to the same `yt_<id>.mp4.part`, and yt-dlp resumes a
+    # partial by default. If the first selector picked a progressive format and
+    # died mid-transfer, the retry would Range-request a *different* format's
+    # bytes and append them to what is already on disk. Nothing checks that the
+    # two halves came from the same stream, so the join produces a file that
+    # exists and plays wrong — and `os.path.exists` below reads that as success.
+    rec = _run(monkeypatch, _FailFirstMediaRecorder(str(tmp_path), succeed_on=2))
+    YouTubeCrawler().download(URL, str(tmp_path))
+
+    media = [c for c in rec.calls if "--merge-output-format" in c]
+    assert "--no-continue" not in media[0], "the first attempt has nothing to resume from"
+    assert "--no-continue" in media[1], (
+        "the retry changes format, so any partial on disk belongs to a different "
+        "stream — resuming onto it silently corrupts the file"
+    )

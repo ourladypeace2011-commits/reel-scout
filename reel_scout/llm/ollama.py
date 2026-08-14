@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import time
 import urllib.error
 import urllib.request
 
 from .. import config
+from ..utils.stderr import warn
 from .base import BaseLLM
 
 
@@ -67,16 +67,29 @@ class OllamaLLM(BaseLLM):
             try:
                 with urllib.request.urlopen(req, timeout=config.LLM_TIMEOUT) as resp:
                     result = json.loads(resp.read().decode("utf-8"))
+                if "response" not in result:
+                    # A 200 whose body is not a generate response: an error
+                    # envelope, a proxy in front of Ollama, a schema that moved.
+                    # An empty `response` is legitimate (the model produced
+                    # nothing); a *missing* one means this is not the reply we
+                    # think it is, and returning "" for it hands the merger an
+                    # empty result that looks like a successful call. Not raised,
+                    # because some compatible backends may legitimately differ
+                    # and a hard error would break a setup that works today.
+                    keys = ", ".join(sorted(result)) or "none"
+                    warn(
+                        "  LLM returned 200 with no 'response' field"
+                        " (keys: %s); treating as empty" % keys
+                    )
                 return result.get("response", "")
             except Exception as exc:  # noqa: BLE001
                 last = i == attempts - 1
                 if last or not _is_timeout(exc):
                     raise
                 wait = config.LLM_RETRY_BACKOFF * (2 ** i)
-                print(
+                warn(
                     "  LLM timed out after %gs (attempt %d/%d); retrying in %gs"
-                    % (config.LLM_TIMEOUT, i + 1, attempts, wait),
-                    file=sys.stderr,
+                    % (config.LLM_TIMEOUT, i + 1, attempts, wait)
                 )
                 time.sleep(wait)
         raise AssertionError("unreachable")  # pragma: no cover

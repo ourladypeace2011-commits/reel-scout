@@ -10,6 +10,7 @@ from .base import BaseCrawler, VideoMeta
 from .rate_limiter import get_limiter
 from . import ytdlp
 from .. import config
+from ..utils.stderr import warn
 
 
 class YouTubeCrawler(BaseCrawler):
@@ -101,7 +102,7 @@ class YouTubeCrawler(BaseCrawler):
         # than nothing, but refusing to ingest at all is worse than both.
         expected = os.path.join(output_dir, f"yt_{vid}.mp4")
 
-        def _download(selector: str):
+        def _download(selector: str, *extra: str):
             return subprocess.run(
                 ytdlp.cmd(
                     "-f", selector,
@@ -109,6 +110,7 @@ class YouTubeCrawler(BaseCrawler):
                     "-o", output_template,
                     "--no-playlist",
                     "--remote-components", "ejs:github",
+                    *extra,
                     url,
                 ),
                 capture_output=True, text=True, timeout=300,
@@ -135,7 +137,26 @@ class YouTubeCrawler(BaseCrawler):
             # Quality-first stays first. This is the "something beats nothing"
             # floor, not a new default — the previous chain's own comment makes
             # the same trade for AV1.
-            result = _download("18/best[ext=mp4][protocol^=http]/best[ext=mp4]/best")
+            #
+            # `--no-continue` is load-bearing, not tidiness. yt-dlp resumes a
+            # partial by default, and both attempts write to the same
+            # `yt_<id>.mp4.part`: if the first selector landed on a progressive
+            # format and died mid-transfer, the second would issue a Range
+            # request for a *different* format's stream and append it to those
+            # bytes. Nothing validates that the two halves are the same video.
+            # The result is a corrupt file that exists, so the check below reads
+            # it as success — the exact failure this whole change is about.
+            #
+            # Say so out loud. The fallback usually lands on 360p, and silently
+            # handing back a lower-quality clip is its own quiet wrongness.
+            warn(
+                "  yt-dlp: preferred formats produced no file; retrying with a"
+                " progressive format (expect lower quality)"
+            )
+            result = _download(
+                "18/best[ext=mp4][protocol^=http]/best[ext=mp4]/best",
+                "--no-continue",
+            )
 
         if not os.path.exists(expected):
             # No media produced -> genuine download failure (not a subtitle hiccup).

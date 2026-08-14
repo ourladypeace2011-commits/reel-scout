@@ -218,3 +218,30 @@ def test_ollama_does_not_retry_non_timeout(monkeypatch):
     # A 404 fails identically on attempt four; retrying it only delays the
     # error by LLM_TIMEOUT x LLM_MAX_RETRIES.
     assert calls["n"] == 1
+
+
+def test_ollama_says_so_when_a_200_carries_no_response_field(monkeypatch, capsys):
+    # An empty `response` is legitimate: the model produced nothing. A *missing*
+    # one means the 200 is not a generate reply at all — an error envelope, a
+    # proxy in front of Ollama, a schema that moved. Both return "", so without
+    # this line the merger gets an empty result that reads as a successful call.
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 0)
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", return_value=_MockResponse({"error": "nope"})):
+        assert llm.complete("x") == ""
+    err = capsys.readouterr().err
+    assert "no 'response' field" in err
+    assert "error" in err, "name the keys that did arrive, or there is nothing to debug"
+
+
+def test_ollama_stays_quiet_when_the_model_legitimately_returns_nothing(
+    monkeypatch, capsys
+):
+    # The guard must not fire on the normal empty answer, or it is noise.
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 0)
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", return_value=_MockResponse({"response": ""})):
+        assert llm.complete("x") == ""
+    assert "no 'response' field" not in capsys.readouterr().err
