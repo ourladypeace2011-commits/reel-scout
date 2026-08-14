@@ -99,22 +99,44 @@ class YouTubeCrawler(BaseCrawler):
         # The chain degrades rather than fails. A video offered only in AV1
         # still downloads on the last two selectors — a blank player is worse
         # than nothing, but refusing to ingest at all is worse than both.
-        dl_cmd = ytdlp.cmd(
-            "-f", "bestvideo[height<=720][vcodec!*=av01]+bestaudio/"
-                  "best[height<=720][vcodec!*=av01]/"
-                  "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "--merge-output-format", "mp4",
-            "-o", output_template,
-            "--no-playlist",
-            "--remote-components", "ejs:github",
-            url,
-        )
-        result = subprocess.run(
-            dl_cmd, capture_output=True, text=True, timeout=300,
+        expected = os.path.join(output_dir, f"yt_{vid}.mp4")
+
+        def _download(selector: str):
+            return subprocess.run(
+                ytdlp.cmd(
+                    "-f", selector,
+                    "--merge-output-format", "mp4",
+                    "-o", output_template,
+                    "--no-playlist",
+                    "--remote-components", "ejs:github",
+                    url,
+                ),
+                capture_output=True, text=True, timeout=300,
+            )
+
+        result = _download(
+            "bestvideo[height<=720][vcodec!*=av01]+bestaudio/"
+            "best[height<=720][vcodec!*=av01]/"
+            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
         )
 
-        # Find downloaded file
-        expected = os.path.join(output_dir, f"yt_{vid}.mp4")
+        if not os.path.exists(expected):
+            # The `/` chain above only degrades while *choosing* a format. Once a
+            # format is chosen and the download itself dies — 403 on the separate
+            # video stream is the one seen in the wild (E8Bx9OlpmdM, 2026-08-13)
+            # — yt-dlp does not walk to the next selector. It just fails, and the
+            # clip never enters the library.
+            #
+            # So the fallback has to live here, at the download layer. Progressive
+            # (pre-muxed) formats come from a different URL than the separate
+            # streams, so they are frequently reachable when the split ones are
+            # not: that same 403'd video downloaded fine at `-f 18`.
+            #
+            # Quality-first stays first. This is the "something beats nothing"
+            # floor, not a new default — the previous chain's own comment makes
+            # the same trade for AV1.
+            result = _download("18/best[ext=mp4][protocol^=http]/best[ext=mp4]/best")
+
         if not os.path.exists(expected):
             # No media produced -> genuine download failure (not a subtitle hiccup).
             raise RuntimeError(f"yt-dlp download failed: {ytdlp.format_error(result.stderr)}")

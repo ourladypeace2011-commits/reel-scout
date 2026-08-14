@@ -127,3 +127,69 @@ def test_media_format_prefers_anything_but_av1(tmp_path, monkeypatch, no_rate_li
         assert "vcodec!*=av01" in alt
     # ...and a tail with no codec constraint, so AV1-only uploads still land
     assert any("vcodec" not in alt for alt in alternatives[2:])
+
+
+# --- download-layer fallback (2026-08-15) --------------------------------
+#
+# The `/` chain only degrades while *choosing* a format. E8Bx9OlpmdM (Gary Chen,
+# 11:41, seen 2026-08-13) chose the separate video+audio streams, then got HTTP
+# 403 on the video stream — and yt-dlp did not walk to the next selector, it just
+# failed. The same clip downloaded fine at `-f 18`. So the fallback has to sit at
+# the download layer, which is what these two tests pin.
+
+
+class _FailFirstMediaRecorder(_Recorder):
+    """Media pass fails until the Nth attempt, then writes the file.
+
+    Stands in for "the chosen format 403s but a progressive one is reachable".
+    """
+
+    def __init__(self, out_dir, succeed_on=2):
+        super().__init__(out_dir)
+        self._succeed_on = succeed_on
+        self.media_attempts = 0
+
+    def __call__(self, cmd, **kw):
+        if "--merge-output-format" in cmd:
+            self.calls.append(cmd)
+            self.media_attempts += 1
+            if self.media_attempts < self._succeed_on:
+                return _Done(1, stderr="ERROR: unable to download video data: HTTP Error 403")
+            open(os.path.join(self._out_dir, "yt_h1YeIE0vEIs.mp4"), "wb").write(b"x" * 10)
+            return _Done(0)
+        return super().__call__(cmd, **kw)
+
+
+def test_download_retries_with_progressive_format_after_a_403(
+    tmp_path, monkeypatch, no_rate_limit
+):
+    rec = _run(monkeypatch, _FailFirstMediaRecorder(str(tmp_path), succeed_on=2))
+    YouTubeCrawler().download(URL, str(tmp_path))
+
+    media = [c for c in rec.calls if "--merge-output-format" in c]
+    assert len(media) == 2, "a failed download must be retried, not surrendered"
+
+    first = media[0][media[0].index("-f") + 1]
+    second = media[1][media[1].index("-f") + 1]
+
+    # First attempt stays quality-first: separate streams, capped at 720.
+    assert first.startswith("bestvideo[")
+    # The retry must ask for something *different*, and specifically for a
+    # pre-muxed stream — retrying the identical selector would 403 again.
+    assert second != first
+    assert second.startswith("18/"), second
+
+
+def test_download_still_raises_when_every_format_fails(
+    tmp_path, monkeypatch, no_rate_limit
+):
+    # succeed_on=99 -> nothing ever lands. The retry must not turn a real
+    # failure into a silent success; a clip that never downloaded has to be
+    # loud, or the batch reports "completed" over a hole.
+    rec = _run(monkeypatch, _FailFirstMediaRecorder(str(tmp_path), succeed_on=99))
+    with pytest.raises(RuntimeError, match="download failed"):
+        YouTubeCrawler().download(URL, str(tmp_path))
+
+    assert rec.media_attempts == 2, "exactly one retry, not an unbounded loop"
+    # No media -> still no point spending a request on captions.
+    assert not [c for c in rec.calls if "--skip-download" in c]
