@@ -395,7 +395,7 @@ def test_init_db_is_silent_when_the_database_already_exists(
 
 # --- mixed traditional/simplified transcripts (2026-08-15) ----------------
 #
-# A transcript can change script partway through: 貝克書 EP20, 28,331 chars,
+# A transcript can change script partway through: one 28,331-char transcript
 # flips at 83% with no interleaving. Searching it for 這 returns the first 83%
 # and no error. 2 of the 18 Chinese transcripts in the reference library are
 # mixed like this, and the detector below scores 18/18 against them — 0 false

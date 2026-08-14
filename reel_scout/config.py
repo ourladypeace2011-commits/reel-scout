@@ -85,6 +85,14 @@ LLM_MODEL = os.getenv("LLM_MODEL", "")
 # Retries are for timeouts only. A malformed request or a model that does not
 # exist fails the same way on attempt three, so retrying those just delays the
 # error by LLM_TIMEOUT × LLM_MAX_RETRIES.
+#
+# Know the worst case before starting a large unattended batch: at these
+# defaults one call that keeps timing out costs 600 + 5 + 600 + 10 + 600 =
+# 1815s, three times the 600s it cost before. That is the price of surviving
+# transient contention, and it is only paid when the calls actually time out —
+# but if the model is simply too large for the machine, every call pays it and a
+# 100-clip run takes 3x as long to tell you. `LLM_MAX_RETRIES=0` restores the
+# old fail-fast behaviour without touching the source.
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "600"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 # Seconds before the first retry; each further retry doubles it. Backoff matters

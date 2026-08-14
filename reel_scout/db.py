@@ -658,7 +658,7 @@ def scan_script_mix(text: str) -> Tuple[int, int]:
     """(traditional-only hits, simplified-only hits) in `text`.
 
     Both non-zero means the file changes script partway through. That happens —
-    貝克書 EP20, 28,331 chars, flips at 83% with no interleaving — and it is
+    one 28,331-char transcript flips at 83% with no interleaving — and it is
     invisible: a keyword search for 這 returns the first 83% and no error. Two of
     the 18 Chinese transcripts in the reference library are mixed like this.
     """

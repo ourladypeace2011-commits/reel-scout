@@ -19,6 +19,51 @@
   cannot be resolved are reported and deliberately left alone, because
   rewriting a path you cannot verify turns a recoverable row into a confidently
   wrong one.
+- **An LLM call that timed out took the clip down with it, and the timeout was
+  unreachable from outside the source.** The 600s limit was a hardcoded constant
+  with no retry, so a transient condition produced a permanent loss: on
+  2026-08-11 a 96-clip re-merge dropped 3 clips to Ollama contention, and all
+  three re-ran fine at 84/125/101s once the machine was idle. Contention is an
+  external condition and a fixed constant is an internal choice; welding them
+  together meant the only way to survive a busy machine was to edit the code.
+  `LLM_TIMEOUT`, `LLM_MAX_RETRIES` and `LLM_RETRY_BACKOFF` are now environment
+  variables and appear in `config show`. Retries are for timeouts **only** — a
+  malformed request or a missing model fails identically on attempt three, so
+  retrying those would just delay the same error by timeout × retries.
+- **A 403 during the download killed the ingest even though the format chain had
+  three more selectors left.** The `/` chain in `-f` degrades while *choosing* a
+  format; once a format is chosen and the transfer itself dies, yt-dlp does not
+  walk to the next selector — it fails, and the clip never enters the library.
+  Seen in the wild on E8Bx9OlpmdM, where the separate video stream 403'd while
+  the same video downloaded fine as progressive `18`. The fallback therefore has
+  to live at the download layer, not in the selector string: if the quality-first
+  attempt produces no file, a progressive format is tried before the failure is
+  raised. Progressive formats come from a different URL than the split streams,
+  which is exactly why they survive when the split ones do not. Quality-first
+  stays first; this is the "something beats nothing" floor, the same trade the
+  existing chain already makes for AV1.
+- **Opening a database that did not exist created an empty one and said nothing.**
+  `DB_PATH` is cwd-relative, so running from the wrong directory produced a fresh
+  empty database that then reported zero pending work — indistinguishable from a
+  library that is fully up to date. Three separate incidents traced back to this.
+  `init_db` now prints a one-line notice with the **absolute** path when it
+  creates the file, which is the piece that makes the mistake visible: the path
+  is either the one you expected or obviously not. Creating on demand is kept
+  deliberately — raising instead was checked and rejected, because 40+ call sites
+  and first-run setup all depend on it, so the fix is to remove the silence, not
+  the behaviour.
+- **A Chinese transcript could change script partway through a single file, and
+  searching it found only the first half.** One 28,331-character transcript in
+  the reference library is traditional up to 83% and simplified from there, with
+  no interleaving and no error: searching it for `這` returns the first 83% and
+  reports nothing wrong. `save_transcript` now scans for script mixing and warns
+  with the position of the flip. It **reports and does not convert** — converting
+  requires first deciding which script the library standardises on, and it would
+  add a dependency the core install deliberately does not have. The detector's
+  character sets exclude 後/后 and 麼/么, whose "simplified" forms are also real
+  traditional characters (皇后, 幺么); a detector that fires on clean text teaches
+  people to ignore it. Validated against the library: 18/18 mixed files found,
+  zero false positives.
 - **ffmpeg and whisper.cpp still reported the wrong end of stderr.** `crawl/ytdlp.py`
   fixed this for yt-dlp, but the audio-extraction and whisper.cpp paths kept a
   blind `stderr[:300]` / `[:500]`. Both print banners and progress first and the
