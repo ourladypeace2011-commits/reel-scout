@@ -644,6 +644,29 @@ def list_videos(
 
 # --- Transcript CRUD ---
 
+# Twenty high-frequency characters per script, chosen so each one is exclusive:
+# it appears in one script's ordinary prose and not the other's. Deliberately
+# excluded: 後/后 and 麼/么, whose "simplified" form is also a real traditional
+# character (皇后, 幺么) — a detector that fires on those would flag clean
+# traditional text. Twenty is decisive on a paragraph and stays readable; a full
+# conversion table would be a dependency, and this detects, it does not convert.
+_TRAD_ONLY = "這個說時來對開發國學實體會過樣應點總經電"
+_SIMP_ONLY = "这个说时来对开发国学实体会过样应点总经电"
+
+
+def scan_script_mix(text: str) -> Tuple[int, int]:
+    """(traditional-only hits, simplified-only hits) in `text`.
+
+    Both non-zero means the file changes script partway through. That happens —
+    貝克書 EP20, 28,331 chars, flips at 83% with no interleaving — and it is
+    invisible: a keyword search for 這 returns the first 83% and no error. Two of
+    the 18 Chinese transcripts in the reference library are mixed like this.
+    """
+    trad = sum(text.count(c) for c in set(_TRAD_ONLY))
+    simp = sum(text.count(c) for c in set(_SIMP_ONLY))
+    return trad, simp
+
+
 def save_transcript(
     conn: sqlite3.Connection,
     video_id: str,
@@ -653,6 +676,27 @@ def save_transcript(
     whisper_model: str,
     duration_sec: float,
 ) -> None:
+    # Detect, do not convert. Normalising would mean picking traditional or
+    # simplified for every downstream consumer — a product decision, and one that
+    # needs opencc, which core install deliberately does not carry. Reporting the
+    # mix costs nothing and removes the part that actually hurts: not knowing.
+    #
+    # Not gated on `language`: that field is wrong often enough to matter (one
+    # library clip is tagged zh with an English transcript), and gating on it
+    # would skip exactly the mislabelled files this is meant to catch. Text with
+    # no Chinese in it scores (0, 0) and says nothing, so the gate bought only
+    # the illusion of one.
+    if text_full:
+        trad, simp = scan_script_mix(text_full)
+        if trad and simp:
+            minor = min(trad, simp)
+            total = trad + simp
+            print(
+                "  ⚠️  transcript mixes traditional and simplified "
+                "(%d / %d, minority %.0f%%) — a keyword search will silently "
+                "miss whichever half it is not written in" % (trad, simp, 100.0 * minor / total),
+                file=sys.stderr,
+            )
     conn.execute(
         """INSERT OR REPLACE INTO transcripts
            (video_id, language, text_full, segments_json, whisper_model, duration_sec)
