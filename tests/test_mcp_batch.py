@@ -301,3 +301,72 @@ def test_batch_tools_never_write_to_stdout(temp_db, no_spawn, capsys, tool, args
     capsys.readouterr()
     tools.call_tool(tool, dict(args, force=True) if tool == "batch_start" else args)
     assert capsys.readouterr().out == ""
+
+
+# --- "completed" must not mean "completed with a hole in it" ------------------
+#
+# `mark_batch_completed` never consulted the failure counter, so a batch whose
+# every item failed reported `state: "completed"` with `counts.failed: N` sitting
+# right beside it, ignored. Students reach this package through the MCP server
+# (Claude Desktop, no terminal), so this -- not the CLI exit code -- is the path
+# that told them a batch was fine when it was not.
+
+
+def _finished(temp_db, urls, done=(), failed=()):
+    """A batch the worker ran to the end, with the given per-item outcomes."""
+    started = _parse(tools.call_tool("batch_start", {"urls": list(urls), "mode": "agent"}))
+    conn = _conn(temp_db)
+    try:
+        for u in done:
+            db.update_batch_item(conn, started["batch_id"], u, "done", video_id="v")
+        for u in failed:
+            db.update_batch_item(conn, started["batch_id"], u, "error",
+                                 error="analyze exited non-zero")
+        db.mark_batch_completed(conn, started["batch_id"])
+    finally:
+        conn.close()
+    return started["batch_id"]
+
+
+def test_a_batch_that_finished_with_failures_is_not_called_completed(temp_db, no_spawn):
+    urls = ["https://www.youtube.com/shorts/aaaaaaaaaaa",
+            "https://www.youtube.com/shorts/bbbbbbbbbbb",
+            "https://www.youtube.com/shorts/ccccccccccc"]
+    _finished(temp_db, urls, done=urls[:1], failed=urls[1:])
+
+    payload = _parse(tools.call_tool("batch_status", {}))
+    assert payload["state"] == "completed_with_failures"
+    assert payload["counts"]["failed"] == 2
+    assert "not a crash" in payload["note"], (
+        "the note has to separate this from a dead worker, or the reader learns "
+        "nothing the counts did not already say")
+
+
+def test_a_batch_where_everything_landed_is_still_plain_completed(temp_db, no_spawn):
+    # The derivation must not fire on a clean run, or the new state means nothing.
+    urls = ["https://www.youtube.com/shorts/aaaaaaaaaaa"]
+    _finished(temp_db, urls, done=urls)
+    assert _parse(tools.call_tool("batch_status", {}))["state"] == "completed"
+
+
+def test_a_dead_worker_is_still_called_failed(temp_db, no_spawn):
+    """The non-collision requirement, executable.
+
+    `failed` means and only means "the worker process died". A batch that ran to
+    the end with failed items is a different fact and must never borrow the word,
+    because one is a hole in the results and the other is a hole in the run.
+    """
+    urls = ["https://www.youtube.com/shorts/aaaaaaaaaaa"]
+    started = _parse(tools.call_tool("batch_start", {"urls": urls, "mode": "agent"}))
+    conn = _conn(temp_db)
+    try:
+        db.set_batch_meta(conn, started["batch_id"], status="failed")
+    finally:
+        conn.close()
+
+    payload = _parse(tools.call_tool("batch_status", {}))
+    assert payload["state"] == "failed"
+    assert payload["counts"]["failed"] == 0, "no item failed -- the worker did"
+    assert "batch.log" in payload["note"], (
+        "a bare `failed` with no pointer to the traceback is the least "
+        "explanatory state carrying the most alarming word")

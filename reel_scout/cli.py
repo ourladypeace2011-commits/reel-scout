@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import __version__, batch, config, mcp_install, skill_install
 from .utils import paths as media_paths
@@ -363,7 +363,12 @@ def main(argv: List[str] = None) -> None:
         "db": _cmd_db,
         "config": _cmd_config,
     }
-    handlers[args.command](args)
+    # A handler that returns a number is telling the shell the work did not all
+    # land. Everything else returns None and exits 0, exactly as before -- the
+    # four handlers that already raise SystemExit themselves are untouched.
+    code = handlers[args.command](args)
+    if code:
+        raise SystemExit(code)
 
 
 def _read_url_lines(path: str) -> List[str]:
@@ -874,13 +879,26 @@ def _cmd_ingest(args) -> None:
         conn.close()
 
 
-def _cmd_batch(args) -> None:
+def _cmd_batch(args) -> Optional[int]:
+    """Analyze a list of reels. Returns 1 when the run did not fully land.
+
+    The exit code answers one question: did this command produce what it was
+    asked for? Not "whose fault was it". Every path below that prints an
+    explanation and produces no bundles returns 1, because a shell reading exit
+    0 is being told the work is done -- and a batch that silently reports
+    success over a hole is the entire family of bugs this release is about.
+
+    Two paths deliberately stay 0. `--dry-run` succeeded: the listing *is* the
+    deliverable. And a run whose items all landed but left `pending_completion`
+    is the designed terminal state of `--mode agent`, which SKILL.md recommends;
+    painting it red would make the recommended path permanently look broken.
+    """
     if args.doc:
         try:
             text = batch.fetch(args.doc)
         except (RuntimeError, OSError) as e:
             print(f"Error: {e}")
-            return
+            return 1
     elif args.src_file:
         with open(args.src_file, encoding="utf-8") as f:
             text = f.read()
@@ -891,9 +909,12 @@ def _cmd_batch(args) -> None:
     if args.limit:
         entries = entries[:args.limit]
     if not entries:
+        # The second line is the same remedy the fetch failure above prints,
+        # which is the tell: this state is usually a fetch that succeeded into a
+        # sign-in page rather than a genuinely empty list.
         print("No Instagram / TikTok / YouTube Shorts links found in that source.")
         print("  If it's a Google doc, check sharing is 'Anyone with the link - Viewer'.")
-        return
+        return 1
 
     print("Found %d:" % len(entries))
     for i, (label, url) in enumerate(entries, 1):
@@ -904,14 +925,20 @@ def _cmd_batch(args) -> None:
     print("\nVLM reachable: %s   Whisper: %s"
           % ("yes" if caps["vlm"] else "no", "yes" if caps["whisper"] else "no"))
     if mode is None:
+        # One of these messages says "That is a choice, not an error". It is
+        # right about blame and says nothing about state: nothing was analyzed.
+        # Exiting 0 here would tell a wrapper the batch is done, on the exact
+        # path a first-time user hits. The extra line keeps the message and the
+        # status from contradicting each other.
         print("\n" + msg)
-        return
+        print("\n(Nothing was analyzed, so this exits non-zero.)")
+        return 1
     print("Mode: %s" % mode)
 
     if args.dry_run:
         print("\n--dry-run: nothing was analyzed. Bundles would land in %s/<label>/"
               % args.out)
-        return
+        return None
 
     result = batch.run_batch(entries, args.out, mode,
                              max_mb=args.batch_max_mb, verbose=args.verbose,
@@ -930,6 +957,14 @@ def _cmd_batch(args) -> None:
         print("\n%d failed:" % len(result["failed"]))
         for e in result["failed"]:
             print("  %-14s %s\n                 %s" % (e["label"], e["url"], e["reason"]))
+    if result.get("not_attempted"):
+        print("\n%d never attempted (the run stopped early):"
+              % len(result["not_attempted"]))
+        for e in result["not_attempted"]:
+            print("  %-14s %s" % (e["label"], e["url"]))
+    if result["failed"] or result.get("not_attempted"):
+        return 1
+    return None
 
 
 def _cmd_skill(args) -> None:
