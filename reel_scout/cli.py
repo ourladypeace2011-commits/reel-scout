@@ -54,6 +54,12 @@ def main(argv: List[str] = None) -> None:
     p_analyze.add_argument("--vlm-model", help="VLM model name")
     p_analyze.add_argument("--keyframe-strategy", help="Keyframe strategy (scene, interval, hybrid)")
     p_analyze.add_argument("--keyframe-max", type=int, help="Max keyframes per video (overrides auto duration budget)")
+    p_analyze.add_argument(
+        "--force-keyframes", action="store_true",
+        help="Re-extract keyframes for clips that already have them. The previous "
+             "run's frames and descriptions are kept and marked superseded, not "
+             "deleted. Needed when the sampling itself changed but the request "
+             "looks the same as last time.")
     p_analyze.add_argument("--resolution", type=int, default=0, help="Upscale keyframes to this long-edge px so the VLM can read small on-screen text (0 = native)")
     p_analyze.add_argument("--start", type=float, default=0.0, help="Focus window start (sec); only extract keyframes from [start,end]")
     p_analyze.add_argument("--end", type=float, default=0.0, help="Focus window end (sec); 0 = clip end")
@@ -525,6 +531,7 @@ def _cmd_analyze(args) -> None:
         vlm_model=args.vlm_model,
         keyframe_strategy=args.keyframe_strategy,
         keyframe_max=args.keyframe_max,
+        force_keyframes=getattr(args, "force_keyframes", False),
         resolution=args.resolution,
         start_sec=args.start,
         end_sec=args.end,

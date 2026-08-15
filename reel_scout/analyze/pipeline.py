@@ -92,6 +92,7 @@ class PipelineOptions:
     vlm_model: Optional[str] = None
     keyframe_strategy: Optional[str] = None
     keyframe_max: Optional[int] = None
+    force_keyframes: bool = False
     resolution: int = 0       # 招④ keyframe upscale long-edge px (0 = native)
     start_sec: float = 0.0    # 招③ focus window start (0 = whole clip)
     end_sec: float = 0.0      # 招③ focus window end (0 = whole clip)
@@ -159,6 +160,39 @@ def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
     finally:
         signal.signal(signal.SIGINT, original_handler)
         conn.close()
+
+
+def _wants_new_sampling(conn, video_id: str, options: "PipelineOptions") -> bool:
+    """Should this run re-extract keyframes for a clip that already has some?
+
+    Two triggers, and the scoping of the second one is the whole point.
+
+    `--force-keyframes` is the blunt one: same settings, new selector, do it
+    again. It exists because the flag cannot be inferred -- after the sampling
+    logic itself changes, nothing about the request looks different.
+
+    The other fires when this invocation *explicitly asked* for a strategy or a
+    budget that does not match what is on record. Compared against what was
+    typed, never against the resolved value: `keyframe_strategy` defaults to
+    None and resolves to `config.KEYFRAME_STRATEGY`, an environment variable, so
+    comparing resolved values would mean anyone who changes that variable -- or
+    upgrades into a release with a different default -- silently re-extracts the
+    whole library and spends a VLM call on every frame of it.
+
+    Stored `requested_max` is what was asked for, not what was produced: dedupe
+    and the first/last guarantee both move the final count, so comparing against
+    the number of rows would fire forever on clips that simply deduped well.
+    """
+    if options.force_keyframes:
+        return True
+    run = db.current_keyframe_run(conn, video_id)
+    if run is None:
+        return False
+    if options.keyframe_strategy and options.keyframe_strategy != run["strategy"]:
+        return True
+    if options.keyframe_max and options.keyframe_max != (run["requested_max"] or 0):
+        return True
+    return False
 
 
 def _process_single(
@@ -313,16 +347,32 @@ def _process_single(
     # that lacks one, whether or not extraction happened this run, so a failed or
     # partial VLM pass can be backfilled by re-running analyze.
     existing_kf = db.get_keyframes(conn, video_id)
-    if existing_kf:
+    if existing_kf and not _wants_new_sampling(conn, video_id, options):
         print("  Keyframes already extracted")
         frames = [(kf["id"], kf["file_path"]) for kf in existing_kf]
     else:
-        print("  Extracting keyframes...")
+        if existing_kf:
+            print("  Re-extracting keyframes (previous run kept, superseded)...")
+        else:
+            print("  Extracting keyframes...")
+        strategy = options.keyframe_strategy or ""
+        requested_max = options.keyframe_max or 0
+        run_id = db.begin_keyframe_run(
+            conn, video_id, strategy or config.KEYFRAME_STRATEGY, requested_max)
+
+        # Every run after the first writes into its own directory. The scene
+        # extractor names files `<video_id>_scene_%03d.jpg` and passes `-y`, so
+        # sharing a directory would have a second run overwriting the first run's
+        # images while its rows still pointed at them -- no file deleted, and
+        # every earlier description now describing a picture that is gone. Run 1
+        # keeps the flat path so nothing already stored has to move.
         kf_dir = os.path.join(config.KEYFRAMES_DIR, video_id)
+        if existing_kf:
+            kf_dir = os.path.join(kf_dir, "r%d" % run_id)
         kf_infos = extract_keyframes(
             file_path, kf_dir, video_id,
-            strategy=options.keyframe_strategy or "",
-            max_frames=options.keyframe_max or 0,  # 0 -> 招② auto budget
+            strategy=strategy,
+            max_frames=requested_max,              # 0 -> 招② auto budget
             resolution=options.resolution,         # 招④
             start_sec=options.start_sec,            # 招③
             end_sec=options.end_sec,                # 招③
@@ -332,8 +382,16 @@ def _process_single(
              "file_path": kf.file_path, "strategy": kf.strategy}
             for kf in kf_infos
         ]
-        kf_ids = db.save_keyframes(conn, video_id, kf_data)
-        frames = list(zip(kf_ids, [kf.file_path for kf in kf_infos]))
+        kf_ids = db.save_keyframes(conn, video_id, kf_data, run_id=run_id)
+        if kf_infos:
+            # Only now, with frames actually on disk. Superseding first would
+            # leave a video with no current run at all if extraction died here.
+            db.commit_keyframe_run(conn, run_id, video_id)
+            frames = list(zip(kf_ids, [kf.file_path for kf in kf_infos]))
+        else:
+            print("  Extraction produced no frames — keeping the previous run",
+                  file=sys.stderr)
+            frames = [(kf["id"], kf["file_path"]) for kf in existing_kf]
 
     if options.skip_vision:
         print("  Skipping VLM descriptions — %d keyframe(s) extracted and waiting "

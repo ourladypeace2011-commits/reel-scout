@@ -71,7 +71,13 @@ def test_migration_adds_tables_to_an_existing_db(temp_db):
 
         db.init_db(c)
 
-        assert c.execute("SELECT version FROM schema_version").fetchone()[0] == 11
+        # Against SCHEMA_VERSION rather than a literal: what this asserts is
+        # "migrating brings the database up to date", which stays true as
+        # migrations are added. A hardcoded number turns every later migration
+        # into an edit here, and an edit made to silence a failure is one nobody
+        # thinks about.
+        assert (c.execute("SELECT version FROM schema_version").fetchone()[0]
+                == db.SCHEMA_VERSION)
         assert annotate.get(c, vid)["note"] is None      # table is there, empty
         assert db.get_video(c, vid) is not None          # nothing was dropped
     finally:
