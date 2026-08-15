@@ -60,16 +60,88 @@ def test_the_generation_budget_comes_from_config(frame, monkeypatch):
         "a budget that cannot be raised from outside is a budget nobody can fix")
 
 
-def test_spending_the_whole_budget_without_answering_says_so(frame, capsys):
-    resp = _Resp({"response": "", "done_reason": "length", "eval_count": 384})
-    with patch("urllib.request.urlopen", return_value=resp):
+def _urlopen_seq(*payloads):
+    """Return each payload in turn, recording the num_predict it was asked with."""
+    seen = []
+    it = iter(payloads)
+
+    def _open(req, timeout=None):
+        seen.append(json.loads(req.data.decode("utf-8"))["options"]["num_predict"])
+        return _Resp(next(it))
+
+    return _open, seen
+
+
+def test_hitting_the_ceiling_buys_more_room_once(frame, monkeypatch):
+    """The frames that need a bigger budget are exactly the ones that hit it.
+
+    Raising the default for everyone would race a distribution with no upper
+    bound and charge every frame for a tail that reaches one in seven. The VLM
+    is the most expensive step here, so the room gets bought per frame, on
+    evidence, once.
+    """
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT", 1000)
+    monkeypatch.setattr(config, "VLM_RETRY_MULTIPLIER", 3)
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT_MAX", 9999)
+
+    _open, seen = _urlopen_seq(
+        {"response": "", "done_reason": "length", "eval_count": 1000},
+        {"response": "A market.\nON_SCREEN_TEXT: NONE\nOBJECTS: stalls",
+         "done_reason": "stop", "eval_count": 1400},
+    )
+    with patch("urllib.request.urlopen", side_effect=_open):
+        out = OllamaVLM("http://localhost:11434", "m").describe_frame(frame)
+
+    assert seen == [1000, 3000], "second attempt must actually ask for more room"
+    assert out.description, "and the answer from it is the one that is kept"
+
+
+def test_a_model_that_stopped_on_its_own_is_not_retried(frame, monkeypatch, capsys):
+    # Empty because it hit the ceiling and empty because it had nothing to say
+    # look identical in `response` and want opposite responses. Retrying the
+    # second returns the same nothing, more slowly.
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT", 1000)
+    _open, seen = _urlopen_seq({"response": "", "done_reason": "stop", "eval_count": 12})
+    with patch("urllib.request.urlopen", side_effect=_open):
+        OllamaVLM("http://localhost:11434", "m").describe_frame(frame)
+
+    assert seen == [1000], "one attempt only"
+    assert "answered nothing" not in capsys.readouterr().err
+
+
+def test_the_retry_is_capped(frame, monkeypatch):
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT", 1200)
+    monkeypatch.setattr(config, "VLM_RETRY_MULTIPLIER", 10)
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT_MAX", 2000)
+
+    _open, seen = _urlopen_seq(
+        {"response": "", "done_reason": "length"},
+        {"response": "ok\nON_SCREEN_TEXT: NONE\nOBJECTS: a", "done_reason": "stop"},
+    )
+    with patch("urllib.request.urlopen", side_effect=_open):
+        OllamaVLM("http://localhost:11434", "m").describe_frame(frame)
+
+    assert seen == [1200, 2000], "the ceiling is a ceiling, not a suggestion"
+
+
+def test_still_empty_after_the_retry_says_it_already_tried(frame, monkeypatch, capsys):
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT", 1200)
+    monkeypatch.setattr(config, "VLM_RETRY_MULTIPLIER", 3)
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT_MAX", 9999)
+
+    _open, _ = _urlopen_seq(
+        {"response": "", "done_reason": "length"},
+        {"response": "", "done_reason": "length"},
+    )
+    with patch("urllib.request.urlopen", side_effect=_open):
         out = OllamaVLM("http://localhost:11434", "m").describe_frame(frame)
 
     assert out.description == ""
     err = capsys.readouterr().err
-    assert "without answering" in err
-    assert "VLM_NUM_PREDICT" in err, "the message has to name the knob that fixes it"
-    assert frame in err, "and which frame, or it cannot be retried"
+    assert "3600" in err, "say how far it already got"
+    assert "retried from 1200" in err, (
+        "or whoever reads this raises a number that has already been raised")
+    assert frame in err, "and which frame, or it cannot be picked up later"
 
 
 def test_a_model_with_genuinely_nothing_to_say_is_not_reported_as_a_budget_problem(
@@ -109,3 +181,23 @@ def test_the_default_budget_clears_what_a_thinking_model_actually_needs():
         "the default has to leave room for a model that reasons before it answers; "
         "%d tokens was measured as the point one finishes on its own"
         % MEASURED_TOKENS_TO_FINISH)
+
+
+def test_a_truncated_answer_is_kept_rather_than_bought_again(frame, monkeypatch):
+    """Hitting the ceiling *with* an answer is a different trade.
+
+    The model can fill the budget and still have said something useful; the tail
+    of that sentence is missing, not the whole description. Retrying would buy a
+    cleaner ending at the price of a second full VLM call -- the most expensive
+    step in this pipeline -- on a frame that already has content. Empty is worth
+    paying to fix; truncated is not.
+    """
+    monkeypatch.setattr(config, "VLM_NUM_PREDICT", 1000)
+    _open, seen = _urlopen_seq({
+        "response": "A market scene with stalls and\nON_SCREEN_TEXT: NONE\nOBJECTS: a",
+        "done_reason": "length"})
+    with patch("urllib.request.urlopen", side_effect=_open):
+        out = OllamaVLM("http://localhost:11434", "m").describe_frame(frame)
+
+    assert seen == [1000], "an answer in hand is not re-bought"
+    assert out.description
