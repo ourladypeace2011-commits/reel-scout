@@ -68,6 +68,19 @@ VLM_MODEL = os.getenv("VLM_MODEL", "qwen2.5vl:7b")
 # (model_available check, logged once) when not installed — the frame is left
 # empty for a later vision retry instead of erroring per frame. Aligned w/ arkiv #83.
 VLM_FALLBACK_MODEL = os.getenv("VLM_FALLBACK_MODEL", "qwen3-vl:8b")
+# How many tokens one frame description may spend.
+#
+# 384 was enough for a model that answers directly and far too little for one
+# that thinks first. Measured on qwen3-vl:8b: at 384 the reply comes back
+# `done_reason: "length"`, `eval_count: 384` and **zero characters** -- the whole
+# budget went on reasoning and the answer had not started. The same frame at
+# 1200 finishes on its own at 934 tokens with a full description.
+#
+# An empty description is not obviously an empty description downstream: the
+# call returns 200, the pipeline files the frame under "failed", and the only
+# visible trace is a count. 23 of 40 frames on one clip came back this way with
+# nothing in the log explaining it.
+VLM_NUM_PREDICT = int(os.getenv("VLM_NUM_PREDICT", "1200"))
 OMLX_BASE_URL = os.getenv("OMLX_BASE_URL", "http://localhost:8000/v1")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
