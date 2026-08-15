@@ -213,3 +213,130 @@ def test_retry_does_not_resume_the_previous_format_partial(
         "the retry changes format, so any partial on disk belongs to a different "
         "stream — resuming onto it silently corrupts the file"
     )
+
+
+# --- a leftover file at the destination ---------------------------------------
+#
+# yt-dlp skips a destination that already exists and exits 0. YouTube's download
+# read file-existence as its only success signal and never looked at the exit
+# status, so a zero-byte or truncated `yt_<id>.mp4` from a killed run made the
+# whole thing report success without transferring a byte. And because the
+# pipeline's own reuse gate is `os.path.exists` too, that bad file was then
+# skipped forever -- the failure is sticky, not a one-run blip.
+
+
+@pytest.fixture
+def probe(monkeypatch):
+    """Control what counts as playable media."""
+    state = {"duration": None}
+    monkeypatch.setattr("reel_scout.ffprobe.probe_duration",
+                        lambda path: state["duration"])
+    return state
+
+
+class _NeverDownloads(_Recorder):
+    """Stands in for yt-dlp finding the destination already occupied."""
+
+    def __call__(self, cmd, **kw):
+        if "--merge-output-format" in cmd:
+            self.calls.append(cmd)
+            return _Done(0)  # "has already been downloaded"
+        return super().__call__(cmd, **kw)
+
+
+def test_an_unplayable_leftover_is_moved_aside_so_the_download_runs(
+    tmp_path, monkeypatch, no_rate_limit, probe
+):
+    stale = tmp_path / "yt_h1YeIE0vEIs.mp4"
+    stale.write_bytes(b"")  # the zero-byte file a killed run leaves
+    probe["duration"] = None  # ffmpeg cannot read it
+
+    rec = _run(monkeypatch, _Recorder(str(tmp_path)))
+    YouTubeCrawler().download(URL, str(tmp_path))
+
+    assert (tmp_path / "yt_h1YeIE0vEIs.mp4.unusable").exists(), (
+        "the bad file must be kept as evidence, not deleted")
+    assert stale.read_bytes() == b"x" * 10, "the download must actually have run"
+    assert [c for c in rec.calls if "--merge-output-format" in c]
+
+
+def test_a_playable_file_already_there_is_left_alone(
+    tmp_path, monkeypatch, no_rate_limit, probe
+):
+    # The other half of the rule. A real cache hit must not be thrown away just
+    # because something was sitting at the destination.
+    good = tmp_path / "yt_h1YeIE0vEIs.mp4"
+    good.write_bytes(b"real media bytes")
+    probe["duration"] = 12.5
+
+    _run(monkeypatch, _NeverDownloads(str(tmp_path)))
+    YouTubeCrawler().download(URL, str(tmp_path))
+
+    assert good.read_bytes() == b"real media bytes"
+    assert not (tmp_path / "yt_h1YeIE0vEIs.mp4.unusable").exists()
+
+
+def test_stale_captions_move_with_the_file_they_came_from(
+    tmp_path, monkeypatch, no_rate_limit, probe
+):
+    # `find_subtitle` globs `<stem>.*.vtt`, so a caption file outlives the video
+    # it belongs to and gets re-attached to whatever downloads next -- one clip's
+    # transcript presented as another's.
+    (tmp_path / "yt_h1YeIE0vEIs.mp4").write_bytes(b"")
+    (tmp_path / "yt_h1YeIE0vEIs.en.vtt").write_text("WEBVTT\n\nold captions\n")
+    probe["duration"] = None
+
+    _run(monkeypatch, _Recorder(str(tmp_path)))
+    YouTubeCrawler().download(URL, str(tmp_path))
+
+    assert (tmp_path / "yt_h1YeIE0vEIs.en.vtt.unusable").exists()
+    assert not (tmp_path / "yt_h1YeIE0vEIs.en.vtt").exists(), (
+        "a caption file left behind would be re-attached to the new download")
+
+
+class _NonZeroButLeavesAFile(_Recorder):
+    """yt-dlp fails partway and leaves a partial behind."""
+
+    def __call__(self, cmd, **kw):
+        if "--merge-output-format" in cmd:
+            self.calls.append(cmd)
+            open(os.path.join(self._out_dir, "yt_h1YeIE0vEIs.mp4"), "wb").write(b"half")
+            return _Done(1, stderr="ERROR: unable to download video data: HTTP Error 403")
+        return super().__call__(cmd, **kw)
+
+
+def test_a_non_zero_exit_is_a_failure_even_when_a_file_is_present(
+    tmp_path, monkeypatch, no_rate_limit, probe
+):
+    # Instagram and TikTok have always checked returncode; YouTube was the odd
+    # one out. A partial left on disk after a 403 must not pass for a download.
+    probe["duration"] = None
+    rec = _run(monkeypatch, _NonZeroButLeavesAFile(str(tmp_path)))
+    with pytest.raises(RuntimeError, match="download failed"):
+        YouTubeCrawler().download(URL, str(tmp_path))
+    assert len([c for c in rec.calls if "--merge-output-format" in c]) == 2, (
+        "a partial from the preferred formats must still fall through to the retry")
+
+
+class _SucceedsWithoutWriting(_Recorder):
+    """Exit 0 and produce nothing -- yt-dlp declining the job quietly."""
+
+    def __call__(self, cmd, **kw):
+        if "--merge-output-format" in cmd:
+            self.calls.append(cmd)
+            return _Done(0)
+        return super().__call__(cmd, **kw)
+
+
+def test_a_zero_exit_that_produced_no_file_is_still_a_failure(
+    tmp_path, monkeypatch, no_rate_limit, probe
+):
+    # The mirror of the returncode check, and it is reachable precisely because
+    # of the fix above: once a stale destination has been moved aside, a yt-dlp
+    # that exits 0 without downloading leaves nothing at all. Trusting the status
+    # alone would hand the pipeline a VideoMeta pointing at a file that is not
+    # there.
+    probe["duration"] = None
+    _run(monkeypatch, _SucceedsWithoutWriting(str(tmp_path)))
+    with pytest.raises(RuntimeError, match="download failed"):
+        YouTubeCrawler().download(URL, str(tmp_path))

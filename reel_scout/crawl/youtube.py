@@ -13,6 +13,22 @@ from .. import config
 from ..utils.stderr import warn
 
 
+def _landed(result, expected: str) -> bool:
+    """Did this yt-dlp run actually produce the file we asked for?
+
+    Instagram and TikTok check ``returncode`` and raise on non-zero
+    (``instagram.py``, ``tiktok.py``); YouTube was the odd one out, treating
+    file existence as the sole success signal and never reading the status at
+    all. That made every "a file is sitting there" case -- stale leftovers, a
+    partial from a killed run -- indistinguishable from a completed download.
+
+    Both conditions, because either alone lies: a non-zero exit with a file
+    present is a partial, and a zero exit with no file is yt-dlp declining to do
+    anything at all.
+    """
+    return result.returncode == 0 and os.path.exists(expected)
+
+
 class YouTubeCrawler(BaseCrawler):
     platform = "youtube"
 
@@ -101,6 +117,9 @@ class YouTubeCrawler(BaseCrawler):
         # still downloads on the last two selectors — a blank player is worse
         # than nothing, but refusing to ingest at all is worse than both.
         expected = os.path.join(output_dir, f"yt_{vid}.mp4")
+        # A leftover file at the destination makes yt-dlp exit 0 without
+        # transferring anything, and the checks below read that as success.
+        ytdlp.clear_unusable_output(expected)
 
         def _download(selector: str, *extra: str):
             return subprocess.run(
@@ -122,7 +141,7 @@ class YouTubeCrawler(BaseCrawler):
             "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
         )
 
-        if not os.path.exists(expected):
+        if not _landed(result, expected):
             # The `/` chain above only degrades while *choosing* a format. Once a
             # format is chosen and the download itself dies — 403 on the separate
             # video stream is the one seen in the wild (E8Bx9OlpmdM, 2026-08-13)
@@ -158,7 +177,7 @@ class YouTubeCrawler(BaseCrawler):
                 "--no-continue",
             )
 
-        if not os.path.exists(expected):
+        if not _landed(result, expected):
             # No media produced -> genuine download failure (not a subtitle hiccup).
             raise RuntimeError(f"yt-dlp download failed: {ytdlp.format_error(result.stderr)}")
         file_path = expected
