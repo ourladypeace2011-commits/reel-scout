@@ -370,3 +370,63 @@ def test_a_dead_worker_is_still_called_failed(temp_db, no_spawn):
     assert "batch.log" in payload["note"], (
         "a bare `failed` with no pointer to the traceback is the least "
         "explanatory state carrying the most alarming word")
+
+
+def test_a_batch_stopped_by_the_deadline_says_the_rest_were_never_tried(
+    temp_db, no_spawn
+):
+    """`incomplete` is its own word for its own fact.
+
+    It is not `completed` (the list was not finished), not `failed` (the worker
+    did its job), and not `completed_with_failures` (nothing failed). Folding it
+    into any of those asks the reader to go and re-run URLs that are fine, or to
+    assume URLs are fine when nobody looked at them.
+    """
+    urls = ["https://www.youtube.com/shorts/aaaaaaaaaaa",
+            "https://www.youtube.com/shorts/bbbbbbbbbbb",
+            "https://www.youtube.com/shorts/ccccccccccc"]
+    started = _parse(tools.call_tool("batch_start", {"urls": urls, "mode": "agent"}))
+    conn = _conn(temp_db)
+    try:
+        db.update_batch_item(conn, started["batch_id"], urls[0], "done", video_id="v1")
+        db.set_batch_meta(conn, started["batch_id"], status="incomplete")
+    finally:
+        conn.close()
+
+    payload = _parse(tools.call_tool("batch_status", {}))
+    assert payload["state"] == "incomplete"
+    assert payload["counts"]["done"] == 1
+    assert payload["counts"]["failed"] == 0, "nothing failed -- the clock ran out"
+    assert "never attempted" in payload["note"]
+
+
+def test_the_worker_records_a_deadline_stop_as_incomplete(temp_db, no_spawn, monkeypatch):
+    """Drives the worker itself, not the row it writes.
+
+    The status test above sets `incomplete` directly, so it holds the *reader*
+    to its contract and says nothing about whether anything ever writes that
+    value. Without this, the branch that does could be deleted and every test
+    still passes.
+    """
+    from reel_scout import batch as batch_mod
+    from reel_scout.mcp import batch_worker
+
+    urls = ["https://www.youtube.com/shorts/aaaaaaaaaaa",
+            "https://www.youtube.com/shorts/bbbbbbbbbbb"]
+    started = _parse(tools.call_tool("batch_start", {"urls": urls, "mode": "agent"}))
+
+    monkeypatch.setattr(batch_mod, "run_batch", lambda *a, **k: {
+        "mode": "agent", "done": [], "failed": [], "pending_completion": [],
+        "deadline_exceeded": True,
+        "not_attempted": [{"label": "b", "url": urls[1]}],
+    })
+    assert batch_worker.run(started["batch_id"]) == 0
+
+    conn = _conn(temp_db)
+    try:
+        row = conn.execute("SELECT status FROM batches WHERE id = ?",
+                           (started["batch_id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "incomplete", (
+        "a run stopped by the clock is neither completed nor a crash")

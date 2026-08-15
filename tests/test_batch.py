@@ -8,9 +8,13 @@ analysis to another is the worst outcome this command has.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import time
+
 import pytest
 
-from reel_scout import batch
+from reel_scout import batch, config
 
 
 # --- capability -> mode ------------------------------------------------------
@@ -174,7 +178,7 @@ def test_slugify_keeps_cjk_and_drops_path_separators(label, idx, want):
 
 def test_run_batch_without_a_callback_behaves_exactly_as_before(temp_db, tmp_path, monkeypatch):
     """The kwarg defaults to None and every existing caller passes nothing."""
-    monkeypatch.setattr(batch, "_run", lambda cmd, verbose: 0)
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
     monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
     monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
     monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
@@ -187,7 +191,7 @@ def test_run_batch_without_a_callback_behaves_exactly_as_before(temp_db, tmp_pat
 
 def test_every_item_transition_is_reported_before_the_batch_returns(
         temp_db, tmp_path, monkeypatch):
-    monkeypatch.setattr(batch, "_run", lambda cmd, verbose: 0)
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
     monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
     monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-" + url[-1])
     monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: True)
@@ -212,7 +216,7 @@ def test_a_failing_item_still_reports_and_the_run_continues(temp_db, tmp_path, m
     monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-" + url[-1])
     # Only the first URL's analyze fails.
     monkeypatch.setattr(batch, "_run",
-                        lambda cmd, verbose: 1 if ("https://x/1" in cmd and "analyze" in cmd) else 0)
+                        lambda cmd, verbose, timeout=None: 1 if ("https://x/1" in cmd and "analyze" in cmd) else 0)
 
     seen = []
     result = batch.run_batch([("A", "https://x/1"), ("B", "https://x/2")],
@@ -227,7 +231,7 @@ def test_a_failing_item_still_reports_and_the_run_continues(temp_db, tmp_path, m
 def test_an_unresolved_video_is_reported_failed_not_done(temp_db, tmp_path, monkeypatch):
     """The mispairing invariant: when it cannot tell which video an analyze
     produced it must skip, never guess. Now also over the callback."""
-    monkeypatch.setattr(batch, "_run", lambda cmd, verbose: 0)
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
     monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
     monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: None)
     monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
@@ -244,7 +248,7 @@ def test_an_unresolved_video_is_reported_failed_not_done(temp_db, tmp_path, monk
 def test_cancel_stops_at_the_next_entry_not_mid_video(temp_db, tmp_path, monkeypatch):
     """Half an analysis is worse than one more finished video, so a cancel is
     honoured between entries and never interrupts one in flight."""
-    monkeypatch.setattr(batch, "_run", lambda cmd, verbose: 0)
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
     monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
     monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-" + url[-1])
     monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
@@ -270,7 +274,7 @@ def test_cancel_stops_at_the_next_entry_not_mid_video(temp_db, tmp_path, monkeyp
 
 def test_a_broken_progress_sink_does_not_kill_the_job(temp_db, tmp_path, monkeypatch):
     """Progress reporting is bookkeeping; the job is the point."""
-    monkeypatch.setattr(batch, "_run", lambda cmd, verbose: 0)
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
     monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
     monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
     monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
@@ -338,7 +342,7 @@ def _record_runs(monkeypatch, rc_for=None, rc_seq=None):
     seen = []
     calls = {}
 
-    def fake_run(cmd, verbose):
+    def fake_run(cmd, verbose, timeout=None):
         seen.append(cmd)
         sub = _sub_of(cmd)
         calls[sub] = calls.get(sub, 0) + 1
@@ -444,3 +448,172 @@ def test_has_score_reads_the_scores_table(temp_db):
     conn.commit()
     assert batch.has_score(conn, "vid-1") is True
     conn.close()
+
+
+# --- a step that never finishes ------------------------------------------------
+#
+# `batch.py` ran its child steps with no timeout at all, so one wedged ffmpeg or
+# one stuck model blocked every remaining clip for as long as the machine stayed
+# up. The batch reported nothing, because it was still, technically, working.
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups differ on Windows")
+def test_a_timed_out_step_does_not_hang_on_its_grandchildren():
+    """The test that catches a timeout feature shipping entirely non-functional.
+
+    `subprocess.run(..., stdout=PIPE, timeout=T)` kills the child and then calls
+    `communicate()`, which waits for the pipe to close -- and it does not close,
+    because the grandchildren inherited the same stdout handle. The timeout hangs
+    inside its own timeout handler.
+
+    Every mock-based test in this file passes against that version. Only a real
+    process tree finds it, so this one spawns one.
+    """
+    started = time.monotonic()
+    rc = batch._run(["sh", "-c", "sleep 60 & wait"], verbose=False, timeout=1)
+    elapsed = time.monotonic() - started
+
+    assert rc == batch.TIMED_OUT
+    assert elapsed < 15, (
+        "killing only the child leaves the grandchild holding the pipe, and the "
+        "wait for it is unbounded -- exactly the hang this was added to stop")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups differ on Windows")
+def test_a_step_that_finishes_in_time_is_not_killed():
+    assert batch._run(["sh", "-c", "exit 0"], verbose=False, timeout=30) == 0
+    assert batch._run(["sh", "-c", "exit 3"], verbose=False, timeout=30) == 3
+
+
+def test_a_hang_and_a_crash_are_not_reported_the_same_way():
+    # This string lands in batch_items.error_message and the MCP `failed[]` list.
+    # "it is stuck" and "it broke" ask for different things from whoever reads it.
+    assert "timed out" in batch._step_failure("analyze", batch.TIMED_OUT, 1800)
+    assert "1800" in batch._step_failure("analyze", batch.TIMED_OUT, 1800)
+    assert "exited non-zero" in batch._step_failure("analyze", 1, 1800)
+
+
+def test_each_step_is_given_its_own_budget(temp_db, tmp_path, monkeypatch):
+    # score's budget is derived from LLM_TIMEOUT rather than flat: the subprocess
+    # timeout has to stay strictly larger than the backend's own, or the kill
+    # pre-empts the in-process error path and the existing retry loses its
+    # diagnosis.
+    seen = {}
+
+    def _fake(cmd, verbose, timeout=None):
+        seen[_sub_of(cmd)] = timeout
+        return 0
+
+    monkeypatch.setattr(batch, "_run", _fake)
+    monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
+    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
+    monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
+    monkeypatch.setattr(batch, "has_score", lambda conn, vid: False)
+    monkeypatch.setattr(config, "LLM_TIMEOUT", 600.0)
+
+    batch.run_batch([("a", "https://x/1")], str(tmp_path), "full")
+
+    assert seen["analyze"] == config.BATCH_ANALYZE_TIMEOUT
+    assert seen["export"] == config.BATCH_EXPORT_TIMEOUT
+    assert seen["score"] > config.LLM_TIMEOUT, (
+        "a score child killed before its own backend timeout destroys the error "
+        "message the retry was there to surface")
+
+
+# --- stopping at a deadline ----------------------------------------------------
+
+def test_run_batch_stops_at_the_deadline_and_names_the_untried(
+    temp_db, tmp_path, monkeypatch
+):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch.time, "monotonic", lambda: clock["t"])
+
+    def _fake(cmd, verbose, timeout=None):
+        clock["t"] += 30.0  # each step burns half a minute
+        return 0
+
+    monkeypatch.setattr(batch, "_run", _fake)
+    monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
+    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
+    monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
+
+    entries = [("c%d" % i, "https://x/%d" % i) for i in range(5)]
+    result = batch.run_batch(entries, str(tmp_path), "agent", deadline_sec=100)
+
+    assert result["deadline_exceeded"] is True
+    assert len(result["done"]) == 2
+    assert result["failed"] == [], (
+        "items that were never attempted must not be recorded against the URL "
+        "or the crawler -- they did not fail, they were not tried")
+    assert [e["url"] for e in result["not_attempted"]] == [
+        "https://x/2", "https://x/3", "https://x/4"]
+
+
+def test_no_deadline_means_no_deadline(temp_db, tmp_path, monkeypatch):
+    # Default off. A deadline that fires on a healthy run is worse than none:
+    # the first thing anyone does is raise it, and then it protects nothing.
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
+    monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
+    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
+    monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
+
+    entries = [("c%d" % i, "https://x/%d" % i) for i in range(4)]
+    result = batch.run_batch(entries, str(tmp_path), "agent")
+
+    assert len(result["done"]) == 4
+    assert "deadline_exceeded" not in result
+    assert "not_attempted" not in result
+
+
+def test_a_clean_run_still_carries_exactly_the_four_keys(temp_db, tmp_path, monkeypatch):
+    # The manifest schema guard. `cancelled` set the precedent for conditional
+    # keys and the new ones follow it, so a normal run's manifest.json stays
+    # byte-identical and the exact-keyset assertion above keeps doing real work.
+    monkeypatch.setattr(batch, "_run", lambda cmd, verbose, timeout=None: 0)
+    monkeypatch.setattr(batch, "_video_ids", lambda conn: set())
+    monkeypatch.setattr(batch, "resolve_video_id", lambda conn, before, url: "vid-1")
+    monkeypatch.setattr(batch, "needs_completion", lambda conn, vid: False)
+
+    result = batch.run_batch([("a", "https://x/1")], str(tmp_path), "agent")
+    assert set(result) == {"mode", "done", "failed", "pending_completion"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups differ on Windows")
+def test_a_group_kill_is_refused_when_the_group_is_our_own():
+    """A kill this wide has to check what it is pointing at.
+
+    `start_new_session=True` is meant to guarantee the child has its own group,
+    and this asserts what happens when that guarantee does not hold -- because it
+    did not hold once. A mutation run flipped the flag, the group kill reached
+    the test process, its parent and the harness above them, and nothing printed
+    a traceback because nothing was left alive to print one. The run also never
+    restored the file it had mutated, so everything after it tested code nobody
+    had written.
+
+    Tested through the decision rather than the effect, so finding a regression
+    does not require killing the process group of whoever runs the suite.
+    """
+    class _Us:
+        pid = os.getpid()
+
+    assert batch._group_to_kill(_Us()) is None, (
+        "a child sharing our group must never be group-killed")
+
+    proc = subprocess.Popen(["sh", "-c", "sleep 5"], start_new_session=True)
+    try:
+        pgid = batch._group_to_kill(proc)
+        assert pgid is not None and pgid != os.getpgid(0), (
+            "a child in its own session is exactly the case the group kill is for")
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_a_child_that_already_exited_is_not_chased(monkeypatch):
+    class _Gone:
+        pid = 999999999
+
+        def kill(self):
+            pass
+
+    assert batch._group_to_kill(_Gone()) is None
