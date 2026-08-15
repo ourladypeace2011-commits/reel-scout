@@ -10,32 +10,11 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__, batch, config, mcp_install, skill_install
 from .utils import paths as media_paths
-
-
-def _force_utf8_stdio() -> None:
-    """Print UTF-8 regardless of the console's codepage.
-
-    Python encodes stdout with the locale codepage, which on Windows is cp950
-    (zh-TW), cp1252 (US/EU) or cp437 (legacy cmd). None of them can encode the
-    emoji that short-form titles are full of, and cp437 cannot even encode the
-    em dash this module prints 163 times -- so `show` died on a traceback
-    before it could list the keyframe paths that Step 2b needs. Replacement
-    characters are a bad look; a UnicodeEncodeError is a broken tool.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            # pytest's capture and anything else that swaps in a plain buffer.
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
-            # Detached or already-closed stream; printing is not our job to fix.
-            pass
+from .utils.stderr import force_utf8_stdio
 
 
 def main(argv: List[str] = None) -> None:
-    _force_utf8_stdio()
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="reel-scout",
         description="Short-form video analysis tool",
