@@ -261,15 +261,12 @@ def _ensure_first_last(
                 score=0.0,
             ))
 
-    # Trim middle frames if exceeding max_frames (remove lowest score)
-    while len(frames) > max_frames:
-        # Find the frame with lowest score among middle frames (not first/last)
-        middle = frames[1:-1]
-        if not middle:
-            break
-        worst = min(middle, key=lambda f: f.score)
-        frames.remove(worst)
-
+    # No trimming here any more. This loop removed `min(middle, key=score)`, and
+    # every scene frame carries score 0.0 -- so `min` returned the *earliest*
+    # middle frame and the budget was balanced by eating the clip from the front,
+    # compounding the truncation it was sitting downstream of. Staying within
+    # budget is now `select_spread`'s job in the caller, which does it by
+    # thinning evenly instead.
     return frames
 
 
@@ -384,7 +381,17 @@ def extract_keyframes(
         resolution, start_sec, end_sec,
     )
 
-    frames = frames[:max_frames]
+    # Back to budget by thinning evenly, not by cutting off the tail.
+    # `_ensure_first_last` may have pushed one or two over; `select_spread` keeps
+    # both ends by construction, so the frames it just guaranteed survive.
+    if len(frames) > max_frames:
+        frames.sort(key=lambda f: f.timestamp_sec)
+        keep = select_spread([f.timestamp_sec for f in frames], max_frames)
+        frames = [frames[i] for i in keep]
+
+    frames.sort(key=lambda f: f.timestamp_sec)
+    for i, f in enumerate(frames):
+        f.frame_index = i
 
     # Last, and deliberately after the cap: `max_frames` says how many this clip
     # is ALLOWED to spend, dedupe says how many it actually needs. Running it
@@ -469,6 +476,49 @@ def scene_timeout(duration_sec: float) -> int:
     return int(min(max(120.0, duration_sec * 0.2), 300.0))
 
 
+def select_spread(timestamps: List[float], n: int) -> List[int]:
+    """Indices of ``n`` timestamps spread across the *time* axis. Ends included.
+
+    The obvious version -- ``[round(i * (m - 1) / (n - 1))]`` -- spreads over cut
+    *ordinal*, and cuts are precisely what is non-uniform in time. A reel with a
+    rapid-fire opening (40 cuts in 4 seconds) and a static outro (2 cuts in 6)
+    would spend three quarters of its budget on the opening and still leave the
+    hole this exists to close. The quantity that has to be bounded is "how much
+    of the clip did the model never see", so the spacing has to be measured in
+    seconds.
+
+    Both ends always survive: the first target is the earliest timestamp and the
+    last is forced, so the extremes of the clip are never the thing that gets
+    dropped to make room.
+    """
+    m = len(timestamps)
+    if n >= m:
+        return list(range(m))
+    if n <= 1:
+        return [0]
+    if n == 2:
+        return [0, m - 1]
+
+    first, last = timestamps[0], timestamps[-1]
+    span = last - first
+    out: List[int] = []
+    lo = 0
+    for j in range(n):
+        target = first + span * j / (n - 1)
+        # Leave room for the picks still to come, so the walk cannot run out of
+        # list and duplicate an index.
+        hi = m - n + j
+        best, best_d = lo, abs(timestamps[lo] - target)
+        for i in range(lo, hi + 1):
+            d = abs(timestamps[i] - target)
+            if d < best_d:
+                best, best_d = i, d
+        out.append(best)
+        lo = best + 1
+    out[-1] = m - 1
+    return out
+
+
 def _extract_scene(
     video_path: str, output_dir: str, video_id: str, max_frames: int,
     resolution: int = 0, start_sec: float = 0.0, end_sec: float = 0.0,
@@ -479,21 +529,22 @@ def _extract_scene(
     cuts is a normal thing to meet, not an error, and the caller has a cheaper
     strategy to fall back on.
     """
-    pattern = os.path.join(output_dir, f"{video_id}_scene_%03d.jpg")
+    # Pass 1 -- find every cut. No `-frames:v`, and no image encoding at all.
+    #
+    # That cap used to be here, and it is where the sampling actually broke:
+    # ffmpeg exits as soon as N output frames exist, so on a clip with 50 cuts
+    # and a budget of 8 it stopped detecting at cut 8 and never looked at the
+    # rest of the video. Everything downstream then divided up a list that only
+    # ever described the opening seconds -- measured on the library, 27 clips
+    # had a single unsampled gap larger than half their length, the worst being
+    # a 40-minute talk seen only for its first minute.
+    #
+    # Dropping the encoding makes this pass strictly cheaper per decoded frame
+    # than the old one, and `-f null -` writes nothing.
     vf = "select='gt(scene,0.3)',showinfo"
-    scale = _scale_vf(resolution)
-    if scale:
-        vf += "," + scale
     cmd = [config.FFMPEG_BIN]
     cmd += _seek_args(start_sec, end_sec)
-    cmd += [
-        "-i", video_path,
-        "-vf", vf,
-        "-vsync", "vfr",
-        "-frames:v", str(max_frames),
-        "-y",
-        pattern,
-    ]
+    cmd += ["-i", video_path, "-vf", vf, "-an", "-f", "null", "-"]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
@@ -508,16 +559,28 @@ def _extract_scene(
     # before -i) ffmpeg resets pts to 0 at the seek point, so add start_sec back to
     # recover absolute video time.
     offset = start_sec if (start_sec and start_sec > 0) else 0.0
-    frames = []
     ts_pattern = re.compile(r"pts_time:(\d+\.?\d*)")
-    matches = ts_pattern.findall(result.stderr)
+    stamps = [float(m) + offset for m in ts_pattern.findall(result.stderr)]
+    if not stamps:
+        return []
 
-    for i, ts_str in enumerate(matches[:max_frames]):
+    # Pass 2 -- extract only the cuts we are keeping, seeking to each one. Same
+    # per-frame grab `_extract_interval` uses, which costs the same whatever the
+    # clip's duration.
+    scale = _scale_vf(resolution)
+    frames = []
+    for i, idx in enumerate(select_spread(stamps, max_frames)):
+        ts = stamps[idx]
         fpath = os.path.join(output_dir, f"{video_id}_scene_{i+1:03d}.jpg")
+        cmd = [config.FFMPEG_BIN, "-ss", str(ts), "-i", video_path]
+        if scale:
+            cmd += ["-vf", scale]
+        cmd += ["-frames:v", "1", "-q:v", "2", "-y", fpath]
+        subprocess.run(cmd, capture_output=True, timeout=30)
         if os.path.exists(fpath):
             frames.append(KeyframeInfo(
                 frame_index=i,
-                timestamp_sec=float(ts_str) + offset,
+                timestamp_sec=ts,
                 file_path=fpath,
                 strategy="scene",
             ))
