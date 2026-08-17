@@ -135,11 +135,13 @@
   the default). The cause was in the ffmpeg pass that *detects* scenes, not the
   one that cuts them: `-frames:v N` makes ffmpeg exit after N outputs, so
   detection stopped early and everything after that point was invisible to the
-  sampler. Measured on a 109-clip library, 27 clips had a single unsampled gap
-  larger than half their length; afterwards, one — and that one is a 22-second
-  clip whose first 13 seconds are a single unchanging shot, so there is nothing
-  there to sample. Detection now runs unbounded and writes no images at all
-  (`-f null -`); the second pass seeks to each selected timestamp. Selection
+  sampler. Measured before the change, 27 clips had a single unsampled gap larger
+  than half their length; measured after, across a library that had grown to 110,
+  one — and that one is a 22-second clip whose first 13 seconds are a single
+  unchanging shot, so there is nothing there to sample. Mean largest gap went
+  from 35.6% of clip length to 17.3%. Detection now runs unbounded and writes no
+  images at all (`-f null -`); the second pass seeks to each selected timestamp.
+  Selection
   spreads across the time axis rather than the ordinal one, so a clip whose cuts
   cluster at the front no longer spends its whole budget there. **The `motion`
   strategy still has the same defect** — `_extract_motion` caps its emitting pass
