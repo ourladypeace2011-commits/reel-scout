@@ -74,6 +74,30 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # --- LLM (for merger/scorer) ---
 LLM_BACKEND = os.getenv("LLM_BACKEND", "omlx")
 LLM_MODEL = os.getenv("LLM_MODEL", "")
+# How long one LLM call may take, and how many times to retry a timeout.
+#
+# The 600s default was hardcoded and unreachable from the outside, which made a
+# real failure mode invisible: on 2026-08-11 a 96-clip re-merge lost 3 clips to
+# Ollama contention — the same clips re-ran fine 84/125/101s later with the
+# machine idle. Contention is an external condition; a fixed constant is an
+# internal choice, and the two should not be welded together.
+#
+# Retries are for timeouts only. A malformed request or a model that does not
+# exist fails the same way on attempt three, so retrying those just delays the
+# error by LLM_TIMEOUT × LLM_MAX_RETRIES.
+#
+# Know the worst case before starting a large unattended batch: at these
+# defaults one call that keeps timing out costs 600 + 5 + 600 + 10 + 600 =
+# 1815s, three times the 600s it cost before. That is the price of surviving
+# transient contention, and it is only paid when the calls actually time out —
+# but if the model is simply too large for the machine, every call pays it and a
+# 100-clip run takes 3x as long to tell you. `LLM_MAX_RETRIES=0` restores the
+# old fail-fast behaviour without touching the source.
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "600"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+# Seconds before the first retry; each further retry doubles it. Backoff matters
+# because the thing being waited out is another process holding the model.
+LLM_RETRY_BACKOFF = float(os.getenv("LLM_RETRY_BACKOFF", "5"))
 OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
 OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "")
 
@@ -243,6 +267,8 @@ def show() -> str:
         f"OLLAMA_BASE_URL:      {OLLAMA_BASE_URL}",
         f"LLM_BACKEND:          {LLM_BACKEND}",
         f"LLM_MODEL:            {LLM_MODEL or '(auto)'}",
+        f"LLM_TIMEOUT:          {LLM_TIMEOUT:g}s"
+        f" (retries={LLM_MAX_RETRIES}, backoff={LLM_RETRY_BACKOFF:g}s)",
         f"OPENCLAW_BASE_URL:    {OPENCLAW_BASE_URL}",
         f"OPENCLAW_MODEL:       {OPENCLAW_MODEL or '(auto)'}",
         f"WHISPER_BACKEND:      {WHISPER_BACKEND}",

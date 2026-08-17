@@ -130,3 +130,118 @@ def test_openclaw_no_key(monkeypatch):
 
     assert result == "no key"
     assert "Authorization" not in captured["headers"]
+
+
+# --- LLM_TIMEOUT / retry (2026-08-15) ------------------------------------
+#
+# The 600s timeout used to be a literal in ollama.py. The failure it hid:
+# 2026-08-11 a 96-clip re-merge lost 3 clips to Ollama contention, and the same
+# clips re-ran fine at 84/125/101s on an idle box. Contention is an external
+# condition; a fixed constant is an internal choice. These tests pin both halves
+# of the fix — the timeout is reachable from config, and a timeout is retried
+# while a non-timeout is not.
+
+
+def test_ollama_uses_config_timeout(monkeypatch):
+    monkeypatch.setattr(config, "LLM_TIMEOUT", 12.5)
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 0)
+    seen = {}
+
+    def _mock_urlopen(req, timeout=None):
+        seen["timeout"] = timeout
+        return _MockResponse({"response": "ok"})
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        assert llm.complete("x") == "ok"
+    # Not 600 — the whole point is that this number now comes from outside.
+    assert seen["timeout"] == 12.5
+
+
+def test_ollama_retries_timeout_then_succeeds(monkeypatch):
+    import socket as _socket
+
+    monkeypatch.setattr(config, "LLM_TIMEOUT", 1)
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 2)
+    monkeypatch.setattr(config, "LLM_RETRY_BACKOFF", 0)  # keep the test instant
+    calls = {"n": 0}
+
+    def _mock_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _socket.timeout("timed out")
+        return _MockResponse({"response": "late but fine"})
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        assert llm.complete("x") == "late but fine"
+    assert calls["n"] == 3
+
+
+def test_ollama_gives_up_after_max_retries(monkeypatch):
+    import socket as _socket
+
+    monkeypatch.setattr(config, "LLM_TIMEOUT", 1)
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 1)
+    monkeypatch.setattr(config, "LLM_RETRY_BACKOFF", 0)
+    calls = {"n": 0}
+
+    def _mock_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise _socket.timeout("timed out")
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        with pytest.raises(_socket.timeout):
+            llm.complete("x")
+    # 1 retry == 2 attempts, and the final failure is raised rather than
+    # swallowed — a silently empty merge is what this change exists to prevent.
+    assert calls["n"] == 2
+
+
+def test_ollama_does_not_retry_non_timeout(monkeypatch):
+    import urllib.error
+
+    monkeypatch.setattr(config, "LLM_TIMEOUT", 1)
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 3)
+    monkeypatch.setattr(config, "LLM_RETRY_BACKOFF", 0)
+    calls = {"n": 0}
+
+    def _mock_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError("u", 404, "model not found", {}, None)
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        with pytest.raises(urllib.error.HTTPError):
+            llm.complete("x")
+    # A 404 fails identically on attempt four; retrying it only delays the
+    # error by LLM_TIMEOUT x LLM_MAX_RETRIES.
+    assert calls["n"] == 1
+
+
+def test_ollama_says_so_when_a_200_carries_no_response_field(monkeypatch, capsys):
+    # An empty `response` is legitimate: the model produced nothing. A *missing*
+    # one means the 200 is not a generate reply at all — an error envelope, a
+    # proxy in front of Ollama, a schema that moved. Both return "", so without
+    # this line the merger gets an empty result that reads as a successful call.
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 0)
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", return_value=_MockResponse({"error": "nope"})):
+        assert llm.complete("x") == ""
+    err = capsys.readouterr().err
+    assert "no 'response' field" in err
+    assert "error" in err, "name the keys that did arrive, or there is nothing to debug"
+
+
+def test_ollama_stays_quiet_when_the_model_legitimately_returns_nothing(
+    monkeypatch, capsys
+):
+    # The guard must not fire on the normal empty answer, or it is noise.
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 0)
+
+    llm = OllamaLLM("http://localhost:11434", "m")
+    with patch("urllib.request.urlopen", return_value=_MockResponse({"response": ""})):
+        assert llm.complete("x") == ""
+    assert "no 'response' field" not in capsys.readouterr().err

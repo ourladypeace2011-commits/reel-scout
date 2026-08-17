@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import tempfile
+
+import pytest
 
 from reel_scout import db
 
@@ -347,5 +350,151 @@ def test_latest_batch_can_be_found_by_source(temp_db):
         db.create_batch(conn, ["https://x/1"], source="cli")
         mine = db.create_batch(conn, ["https://x/2"], source="mcp-batch")
         assert db.get_latest_batch(conn, source="mcp-batch")["id"] == mine
+    finally:
+        conn.close()
+
+
+# --- "brand new empty DB" must be audible (2026-08-15) --------------------
+#
+# REEL_SCOUT_DATA defaults to "./data", relative to wherever the process starts.
+# That default is correct for a student running inside their own project. What
+# was wrong is that opening a database that does not exist looked exactly like
+# opening one that does: sqlite makes the file, every query returns nothing, and
+# "0 targets" is indistinguishable from "already up to date". Three incidents
+# have been logged against this shape.
+
+
+def test_init_db_announces_a_freshly_created_database(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(db.config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(db.config, "DB_PATH", str(tmp_path / "reel_scout.db"))
+    monkeypatch.setattr(db.config, "ensure_dirs", lambda: None)
+
+    conn = db.init_db()
+    conn.close()
+
+    err = capsys.readouterr().err
+    assert "NEW empty database" in err
+    # The absolute path is the whole point — "./data" tells you nothing about
+    # which ./data you just made.
+    assert str(tmp_path) in err
+
+
+def test_init_db_is_silent_when_the_database_already_exists(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(db.config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(db.config, "DB_PATH", str(tmp_path / "reel_scout.db"))
+    monkeypatch.setattr(db.config, "ensure_dirs", lambda: None)
+
+    db.init_db().close()
+    capsys.readouterr()          # drop the first-run notice
+
+    db.init_db().close()
+
+    # A notice on every command would be noise, and noise gets filtered out —
+    # which is how the signal would be lost a second time.
+    assert "NEW empty database" not in capsys.readouterr().err
+
+
+# --- mixed traditional/simplified transcripts (2026-08-15) ----------------
+#
+# A transcript can change script partway through: one 28,331-char transcript
+# flips at 83% with no interleaving. Searching it for 這 returns the first 83%
+# and no error. 2 of the 18 Chinese transcripts in the reference library are
+# mixed like this, and the detector below scores 18/18 against them — 0 false
+# positives, 0 misses. It reports; it does not convert, because converting means
+# picking a script for every downstream consumer.
+
+_TRAD = "這個說時來對開發國學實體會過樣應點總經電"
+_SIMP = "这个说时来对开发国学实体会过样应点总经电"
+
+
+def test_scan_script_mix_flags_only_actual_mixtures():
+    assert db.scan_script_mix(_TRAD)[1] == 0
+    assert db.scan_script_mix(_SIMP)[0] == 0
+    trad, simp = db.scan_script_mix(_TRAD + _SIMP)
+    assert trad and simp
+
+
+def test_scan_script_mix_ignores_chars_that_exist_in_both():
+    # 后 is a real traditional character (皇后) and 么 is too (幺么). A detector
+    # that counted them would flag clean traditional prose as mixed, and a
+    # warning that fires on good input is a warning people learn to skip.
+    trad, simp = db.scan_script_mix("皇后幺么這個說")
+    assert simp == 0, "后/么 must not read as simplified"
+    assert trad > 0
+
+
+def test_save_transcript_warns_on_mixed_script(temp_db, capsys):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        db.init_db(conn)
+        vid = db.upsert_video(conn, platform="yt", platform_id="p1", url="u", title="t")
+        db.save_transcript(conn, vid, "zh", _TRAD + _SIMP, "[]", "w", 1.0)
+        err = capsys.readouterr().err
+        assert "mixes traditional and simplified" in err
+        assert "silently miss" in err
+    finally:
+        conn.close()
+
+
+def test_save_transcript_is_quiet_on_single_script_and_on_non_chinese(temp_db, capsys):
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        db.init_db(conn)
+        v1 = db.upsert_video(conn, platform="yt", platform_id="p1", url="u", title="t")
+        db.save_transcript(conn, v1, "zh", _TRAD * 3, "[]", "w", 1.0)
+        assert "mixes traditional" not in capsys.readouterr().err
+
+        # English stays quiet because it contains no Chinese, not because of its
+        # language tag. The scan deliberately runs on every transcript: one clip
+        # in the library is tagged zh with an English transcript, so trusting
+        # that field would skip precisely the mislabelled files this catches.
+        v2 = db.upsert_video(conn, platform="yt", platform_id="p2", url="u2", title="t")
+        db.save_transcript(conn, v2, "en", "hello world", "[]", "w", 1.0)
+        assert "mixes traditional" not in capsys.readouterr().err
+
+        # ...and a mislabelled file is still caught: language says English, the
+        # text is mixed Chinese, and the warning fires anyway.
+        v3 = db.upsert_video(conn, platform="yt", platform_id="p3", url="u3", title="t")
+        db.save_transcript(conn, v3, "en", _TRAD + _SIMP, "[]", "w", 1.0)
+        assert "mixes traditional" in capsys.readouterr().err
+    finally:
+        conn.close()
+
+
+def test_a_console_that_cannot_print_the_warning_does_not_cost_the_transcript(
+    temp_db, monkeypatch
+):
+    # The warning carries an emoji and an em dash, and printing it used to happen
+    # *before* the INSERT — so on a console that could not encode it, a detector
+    # whose whole job was to report a problem instead deleted the row it was
+    # reporting on. `utils.stderr.warn` absorbs the encoding case, but it catches
+    # a deliberately bounded set; this pins the ordering itself, using a failure
+    # warn does NOT absorb. Even then the transcript has to be on disk already.
+    class _HostileConsole:
+        def write(self, s):
+            raise RuntimeError("a stream wrapper broken in a way warn() cannot absorb")
+
+        def flush(self):
+            pass
+
+    conn = sqlite3.connect(temp_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        db.init_db(conn)
+        vid = db.upsert_video(conn, platform="yt", platform_id="p9", url="u9", title="t")
+        monkeypatch.setattr(sys, "stderr", _HostileConsole())
+        with pytest.raises(RuntimeError):
+            db.save_transcript(conn, vid, "zh", _TRAD + _SIMP, "[]", "w", 1.0)
+        monkeypatch.undo()
+
+        row = conn.execute(
+            "SELECT text_full FROM transcripts WHERE video_id=?", (vid,)
+        ).fetchone()
+        assert row is not None, "scan, write, then talk — talking must come last"
+        assert row["text_full"] == _TRAD + _SIMP
     finally:
         conn.close()
