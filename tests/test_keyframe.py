@@ -12,7 +12,9 @@ from reel_scout.vision.keyframe import (
     _scale_vf,
     _seek_args,
     auto_frame_budget,
+    extract_keyframes,
     scene_timeout,
+    select_spread,
 )
 from reel_scout import config
 
@@ -76,22 +78,32 @@ class TestEnsureFirstLast:
 
     @patch("reel_scout.vision.keyframe.subprocess.run")
     @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
-    def test_ensure_first_last_trims_middle(
+    def test_ensure_first_last_only_ever_adds(
         self, mock_exists: MagicMock, mock_run: MagicMock,
     ) -> None:
+        """It used to trim, and it trimmed the wrong end.
+
+        The loop removed ``min(middle, key=score)``. Every scene frame carries
+        score 0.0, so ``min`` returned the *earliest* middle frame every time --
+        a budget enforced by eating the clip from the front, sitting directly
+        downstream of a detector that was already only reporting the front.
+
+        Enforcing the budget is the caller's job now, via ``select_spread``,
+        which thins evenly. This function guarantees the ends and nothing else,
+        so it must never be the reason a frame disappears.
+        """
         frames = [
             KeyframeInfo(0, 3.0, "/tmp/f0.jpg", "scene", 0.2),
             KeyframeInfo(1, 5.0, "/tmp/f1.jpg", "scene", 0.9),
             KeyframeInfo(2, 7.0, "/tmp/f2.jpg", "scene", 0.1),
         ]
-        # max_frames=4: after adding first+last we get 5, trim to 4
         result = _ensure_first_last(
             "/tmp/video.mp4", "/tmp/out", "vid1", frames, 4, 20.0,
         )
-        assert len(result) == 4
-        # The frame with lowest score (0.1 at 7.0) should be removed
-        timestamps = [f.timestamp_sec for f in result]
-        assert 7.0 not in timestamps
+        kept = [f.timestamp_sec for f in result]
+        for ts in (3.0, 5.0, 7.0):
+            assert ts in kept, "an input frame was dropped by a function that only adds"
+        assert len(result) == 5, "first and last on top of the three given"
 
 
 class TestAutoFrameBudget:
@@ -227,14 +239,29 @@ class TestScaleAndSeekHelpers:
         mock_result.stdout = ""
         mock_run.return_value = mock_result
 
+        mock_result.stderr = "\n".join(
+            "n:%d pts_time:%.1f" % (i, i * 2.0) for i in range(6))
+
         extract_keyframes(
             "/tmp/v.mp4", "/tmp/out", "vid1",
             strategy="scene", max_frames=4, resolution=1024,
         )
-        cmd = mock_run.call_args_list[0][0][0]
-        vf = cmd[cmd.index("-vf") + 1]
-        assert "scale=1024:-2" in vf
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+
+        # Pass 1 finds cuts and encodes nothing, so scaling there would be paid
+        # for and thrown away. It must still ask showinfo for the timestamps.
+        detect = cmds[0]
+        vf = detect[detect.index("-vf") + 1]
         assert "showinfo" in vf
+        assert "scale=" not in vf, "the detection pass writes no images to scale"
+        assert "-f" in detect and detect[detect.index("-f") + 1] == "null"
+
+        # Pass 2 is where pixels are produced, so that is where the resolution
+        # has to apply.
+        grabs = [c for c in cmds[1:] if "-frames:v" in c]
+        assert grabs, "the chosen cuts still have to be extracted"
+        for cmd in grabs:
+            assert "scale=1024:-2" in cmd[cmd.index("-vf") + 1]
 
     @patch("reel_scout.vision.keyframe._get_duration", return_value=30.0)
     @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
@@ -529,3 +556,181 @@ def test_frame_dhash_builds_a_64_bit_hash(monkeypatch):
     monkeypatch.setattr(keyframe.subprocess, "run",
                         lambda *a, **kw: MagicMock(stdout=rev * 8))
     assert keyframe.frame_dhash("/tmp/x.jpg") == (1 << 64) - 1
+
+
+# --- the sampling actually reaching the whole clip -----------------------------
+#
+# Measured on the library before this change: 27 of 101 clips had a single
+# unsampled gap larger than half their length, the average largest gap was 35.6%
+# of the clip, and the worst was a 40-minute talk of which 39 minutes were never
+# looked at. The cause was not the slice at the end of `extract_keyframes` -- that
+# line was dead -- but `-frames:v max_frames` on the detection pass, which made
+# ffmpeg stop *detecting* after N cuts.
+
+
+CLUSTERED = (
+    # A real shape: 10 cuts inside the first 1.7s, then 40 across the rest.
+    [round(0.1 + i * 0.16, 3) for i in range(10)]
+    + [round(1.7 + i * 0.34, 3) for i in range(1, 41)]
+)
+
+
+def _max_gap(values):
+    return max(b - a for a, b in zip(values, values[1:]))
+
+
+class TestSelectSpread:
+    def test_it_keeps_both_ends_and_the_right_count(self):
+        for n in (2, 3, 8, 17):
+            picked = select_spread(CLUSTERED, n)
+            assert len(picked) == n
+            assert len(set(picked)) == n, "no index may be chosen twice"
+            assert picked == sorted(picked)
+            assert picked[0] == 0 and picked[-1] == len(CLUSTERED) - 1
+
+    def test_the_measured_clip_is_covered_end_to_end(self):
+        """The shape that was actually measured: 15.3s, 50 cuts, 10 of them by 1.7s.
+
+        Before this change the kept frames were the earliest 8, all inside the
+        first 1.7 seconds, leaving 13.6s -- 89% of the clip -- never looked at.
+        """
+        n = 8
+        span = CLUSTERED[-1] - CLUSTERED[0]
+        bound = 1.6 * span / (n - 1)
+
+        chosen = [CLUSTERED[i] for i in select_spread(CLUSTERED, n)]
+        assert _max_gap(chosen) <= bound
+
+        earliest = CLUSTERED[:n]  # what the code did before
+        assert _max_gap(earliest + [CLUSTERED[-1]]) > bound
+
+    def test_spacing_by_ordinal_breaks_where_spacing_by_time_does_not(self):
+        """Why the index-space one-liner was not good enough.
+
+        Worth being exact about the evidence: on the measured clip above the
+        ordinal version would also have passed -- 20% of the cuts in the cluster
+        is not enough to break it. It breaks when the clustering is heavier, and
+        heavier clustering is ordinary in this material (a rapid-fire montage
+        opening over a long static tail). This distribution is synthetic, and it
+        is here because the bound has to hold for the bad case, not the mild one.
+        """
+        heavy = ([round(0.05 * i, 3) for i in range(40)]          # 40 cuts in 2s
+                 + [round(2.0 + 1.36 * i, 3) for i in range(1, 11)])  # 10 over 13.6s
+        n = 8
+        span = heavy[-1] - heavy[0]
+        bound = 1.6 * span / (n - 1)
+
+        by_time = [heavy[i] for i in select_spread(heavy, n)]
+        by_ordinal = [heavy[round(i * (len(heavy) - 1) / (n - 1))] for i in range(n)]
+
+        assert _max_gap(by_time) <= bound
+        assert _max_gap(by_ordinal) > bound
+        assert _max_gap(by_time) < _max_gap(by_ordinal)
+
+    def test_asking_for_more_than_there_is_returns_everything(self):
+        assert select_spread([1.0, 2.0, 3.0], 10) == [0, 1, 2]
+
+
+class TestSceneDetectionPass:
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=15.3)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_detection_does_not_stop_at_the_budget(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        """The actual bug, pinned at the argv.
+
+        A test of the selector alone passes against the broken code, because the
+        selector is fed a mocked list. What was wrong is that the real list only
+        ever had `max_frames` entries in it.
+        """
+        res = MagicMock()
+        res.stderr = "\n".join("n:%d pts_time:%.2f" % (i, t)
+                                for i, t in enumerate(CLUSTERED))
+        res.stdout = ""
+        mock_run.return_value = res
+
+        extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                          strategy="scene", max_frames=8)
+
+        detect = mock_run.call_args_list[0][0][0]
+        assert "-frames:v" not in detect, (
+            "capping the detection pass is what made ffmpeg stop looking")
+        assert detect[detect.index("-f") + 1] == "null"
+
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=15.3)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_the_frames_it_grabs_cover_the_clip_not_its_opening(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        res = MagicMock()
+        res.stderr = "\n".join("n:%d pts_time:%.2f" % (i, t)
+                                for i, t in enumerate(CLUSTERED))
+        res.stdout = ""
+        mock_run.return_value = res
+
+        frames = extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                                   strategy="scene", max_frames=8)
+
+        stamps = sorted(f.timestamp_sec for f in frames)
+        assert stamps[-1] > 13.0, (
+            "before this change the last frame grabbed sat at 1.7s on this clip")
+        assert _max_gap(stamps) < 4.0
+
+
+class TestSelectSpreadDegenerate:
+    def test_identical_timestamps_still_return_both_ends(self):
+        """Why forcing the last index is not belt-and-braces.
+
+        With a real spread the walk lands on the final index by itself -- the
+        last target *is* the last timestamp, so the distance is zero. The forcing
+        only bites when the span collapses: every target is then the same value,
+        the argmin takes the earliest candidate each time, and the walk returns
+        the first n indices with the end nowhere in it.
+
+        The callers rely on the promise, not on the usual case:
+        ``_ensure_first_last`` and the budget thinning both assume the frame at
+        the end of the clip is one of the ones that survives.
+        """
+        picked = select_spread([5.0] * 10, 3)
+        assert picked[0] == 0
+        assert picked[-1] == 9, "the end must survive even when time stands still"
+        assert len(set(picked)) == 3
+
+
+class TestBudgetIsThinnedNotTruncated:
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=60.0)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_first_and_last_do_not_push_the_tail_off_the_end(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        """The truncation bug, in the one place it could still live.
+
+        `_ensure_first_last` can hand back two more frames than the budget: one
+        at each end, added because neither zone was covered. Going back to budget
+        with a slice would drop the frame it had just appended at the clip's end
+        -- the same failure as before, moved one function along.
+        """
+        # Cuts that leave both edge zones empty: nothing before 0.5s, nothing
+        # after 59s, and exactly the budget in between.
+        stamps = [10.0, 20.0, 30.0, 40.0]
+        res = MagicMock()
+        res.stderr = "\n".join("n:%d pts_time:%.2f" % (i, t)
+                                for i, t in enumerate(stamps))
+        res.stdout = ""
+        mock_run.return_value = res
+
+        frames = extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                                   strategy="scene", max_frames=4)
+
+        kept = sorted(f.timestamp_sec for f in frames)
+        assert len(frames) == 4, "the budget still has to hold"
+        assert kept[0] < 0.5, "the frame at the clip's start must survive"
+        assert kept[-1] > 59.0, "the frame at the clip's end must survive"
+        assert [f.frame_index for f in sorted(
+            frames, key=lambda f: f.timestamp_sec)] == [0, 1, 2, 3]

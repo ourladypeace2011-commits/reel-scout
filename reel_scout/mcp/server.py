@@ -5,6 +5,7 @@ import sys
 from typing import Any, Dict, Optional
 
 from . import tools
+from ..utils.stderr import force_utf8_stdio
 
 SERVER_INFO = {
     "name": "reel-scout",
@@ -87,6 +88,13 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def main() -> None:
+    # The JSON-RPC replies below go out as raw UTF-8 bytes through
+    # `stream.buffer`, so they were never at risk. Everything *else* the package
+    # prints while serving a request is -- `tools.py` wraps the pipeline in
+    # `redirect_stdout(sys.stderr)` to keep it off the protocol channel, and
+    # that is exactly what lands it on the stream whose encoding nobody had
+    # fixed. Protecting one channel moved the risk to the other.
+    force_utf8_stdio()
     while True:
         message = read_message()
         if message is None:

@@ -14,12 +14,15 @@ Two long-standing footguns live here (roadmap 5B):
 """
 from __future__ import annotations
 
+import glob
 import importlib.util
+import os
 import sys
 from functools import lru_cache
 from typing import List, Tuple
 
 from .. import config
+from ..utils.stderr import warn
 
 
 @lru_cache(maxsize=1)
@@ -77,3 +80,52 @@ def _extractor_hint(msg: str) -> str:
             "outdated — update it: `%s -U` (or `pip install -U yt-dlp`)." % shown
         )
     return ""
+
+
+def clear_unusable_output(expected: str) -> bool:
+    """Move a leftover destination file aside when it is not playable media.
+
+    yt-dlp skips a destination that already exists and exits 0 -- "has already
+    been downloaded". That is the right call for a real cache hit and a trap for
+    anything else: a zero-byte or truncated ``yt_<id>.mp4`` from a killed run
+    makes the whole download report success without transferring a byte, and the
+    caller's ``os.path.exists`` check agrees. Worse, the pipeline's own reuse
+    gate is ``os.path.exists`` too, so the bad file is then skipped *forever* --
+    the failure is sticky, not a one-run blip.
+
+    Playability is the test, not size: ``probe_duration`` returns None for
+    anything ffmpeg cannot read, which is exactly the question being asked, and
+    it costs one subprocess only when a file is already sitting there.
+
+    Nothing is deleted. The file is renamed with a ``.unusable`` suffix, because
+    a file that cannot be read is still evidence about what went wrong, and
+    deciding it is worthless is not this function's call to make.
+
+    Subtitles move with it. ``find_subtitle`` globs ``<stem>.*.vtt``, so a stale
+    caption file outlives the video it came from and would be re-attached to the
+    next download -- a transcript from one clip presented as another's.
+
+    Returns True when something was moved.
+    """
+    if not os.path.exists(expected):
+        return False
+
+    from .. import ffprobe
+
+    if ffprobe.probe_duration(expected) is not None:
+        return False
+
+    stem, _ = os.path.splitext(expected)
+    moved = []
+    for path in [expected] + sorted(glob.glob(stem + ".*.vtt")):
+        try:
+            os.replace(path, path + ".unusable")
+            moved.append(os.path.basename(path))
+        except OSError:
+            # Read-only directory, or something else holding it. Say so rather
+            # than pretend: the download below will overwrite or fail loudly.
+            pass
+    if moved:
+        warn("  note: %s was not playable media; moved aside as .unusable"
+             % ", ".join(moved))
+    return bool(moved)

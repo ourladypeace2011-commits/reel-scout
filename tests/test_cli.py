@@ -7,6 +7,7 @@ import os
 import pytest
 
 from reel_scout import cli, crawl as crawl_pkg, db
+from reel_scout.utils.stderr import force_utf8_stdio
 from reel_scout.crawl import is_profile_url
 from reel_scout.crawl.base import BaseCrawler, VideoMeta
 
@@ -256,7 +257,7 @@ def test_force_utf8_stdio_makes_titles_printable(codepage, monkeypatch):
     monkeypatch.setattr(cli.sys, "stdout", out)
     monkeypatch.setattr(cli.sys, "stderr", err)
 
-    cli._force_utf8_stdio()
+    force_utf8_stdio()
 
     out.write("3 CapCut Tips for Viral \U0001f525 Shorts — pick one:")
     out.flush()
@@ -268,7 +269,7 @@ def test_force_utf8_stdio_survives_a_stream_without_reconfigure(monkeypatch):
     # pytest's capture, and anything else that swaps in a plain buffer.
     monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
     monkeypatch.setattr(cli.sys, "stderr", io.StringIO())
-    cli._force_utf8_stdio()  # must not raise
+    force_utf8_stdio()  # must not raise
 
 
 def test_force_utf8_stdio_survives_a_detached_stream(monkeypatch):
@@ -280,4 +281,35 @@ def test_force_utf8_stdio_survives_a_detached_stream(monkeypatch):
 
     monkeypatch.setattr(cli.sys, "stdout", _Detached())
     monkeypatch.setattr(cli.sys, "stderr", _Detached())
-    cli._force_utf8_stdio()  # must not raise
+    force_utf8_stdio()  # must not raise
+
+
+def test_the_cli_entry_point_fixes_its_console_before_parsing():
+    """Nothing asserted that `main` actually calls the fix.
+
+    The tests above call `force_utf8_stdio` directly, so they kept passing with
+    the call removed from `main` -- the function was covered, its one production
+    caller was not.
+    """
+    import inspect
+
+    src = inspect.getsource(cli.main)
+    assert "force_utf8_stdio()" in src
+
+
+def test_a_path_with_undecodable_bytes_prints_instead_of_crashing(monkeypatch):
+    """Why `errors="replace"` is load-bearing even though the target is UTF-8.
+
+    Every str encodes to UTF-8 -- except one carrying lone surrogates, which is
+    exactly what `os.listdir` hands back for a filename whose bytes are not valid
+    UTF-8 (PEP 383 surrogateescape). `show` prints stored file paths, so this
+    reaches a real console through a real code path.
+    """
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp950")
+    monkeypatch.setattr(cli.sys, "stdout", out)
+    monkeypatch.setattr(cli.sys, "stderr", io.StringIO())
+
+    force_utf8_stdio()
+
+    out.write("data/videos/yt_\udcff\udcfe.mp4")  # lone surrogates, from the filesystem
+    out.flush()

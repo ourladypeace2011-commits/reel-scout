@@ -6,36 +6,15 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import __version__, batch, config, mcp_install, skill_install
 from .utils import paths as media_paths
-
-
-def _force_utf8_stdio() -> None:
-    """Print UTF-8 regardless of the console's codepage.
-
-    Python encodes stdout with the locale codepage, which on Windows is cp950
-    (zh-TW), cp1252 (US/EU) or cp437 (legacy cmd). None of them can encode the
-    emoji that short-form titles are full of, and cp437 cannot even encode the
-    em dash this module prints 163 times -- so `show` died on a traceback
-    before it could list the keyframe paths that Step 2b needs. Replacement
-    characters are a bad look; a UnicodeEncodeError is a broken tool.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            # pytest's capture and anything else that swaps in a plain buffer.
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
-            # Detached or already-closed stream; printing is not our job to fix.
-            pass
+from .utils.stderr import force_utf8_stdio
 
 
 def main(argv: List[str] = None) -> None:
-    _force_utf8_stdio()
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="reel-scout",
         description="Short-form video analysis tool",
@@ -75,6 +54,12 @@ def main(argv: List[str] = None) -> None:
     p_analyze.add_argument("--vlm-model", help="VLM model name")
     p_analyze.add_argument("--keyframe-strategy", help="Keyframe strategy (scene, interval, hybrid)")
     p_analyze.add_argument("--keyframe-max", type=int, help="Max keyframes per video (overrides auto duration budget)")
+    p_analyze.add_argument(
+        "--force-keyframes", action="store_true",
+        help="Re-extract keyframes for clips that already have them. The previous "
+             "run's frames and descriptions are kept and marked superseded, not "
+             "deleted. Needed when the sampling itself changed but the request "
+             "looks the same as last time.")
     p_analyze.add_argument("--resolution", type=int, default=0, help="Upscale keyframes to this long-edge px so the VLM can read small on-screen text (0 = native)")
     p_analyze.add_argument("--start", type=float, default=0.0, help="Focus window start (sec); only extract keyframes from [start,end]")
     p_analyze.add_argument("--end", type=float, default=0.0, help="Focus window end (sec); 0 = clip end")
@@ -363,7 +348,12 @@ def main(argv: List[str] = None) -> None:
         "db": _cmd_db,
         "config": _cmd_config,
     }
-    handlers[args.command](args)
+    # A handler that returns a number is telling the shell the work did not all
+    # land. Everything else returns None and exits 0, exactly as before -- the
+    # four handlers that already raise SystemExit themselves are untouched.
+    code = handlers[args.command](args)
+    if code:
+        raise SystemExit(code)
 
 
 def _read_url_lines(path: str) -> List[str]:
@@ -521,13 +511,13 @@ def _cmd_crawl(args) -> None:
     conn.close()
 
 
-def _cmd_analyze(args) -> None:
+def _cmd_analyze(args):
     from .analyze.pipeline import PipelineOptions, run
 
     urls = _collect_urls(args)
     if not urls and not args.resume:
         print("No URLs provided. Use: reel-scout analyze <url> or --file urls.txt")
-        return
+        return 1
 
     options = PipelineOptions(
         skip_vision=args.skip_vision,
@@ -541,11 +531,15 @@ def _cmd_analyze(args) -> None:
         vlm_model=args.vlm_model,
         keyframe_strategy=args.keyframe_strategy,
         keyframe_max=args.keyframe_max,
+        force_keyframes=getattr(args, "force_keyframes", False),
         resolution=args.resolution,
         start_sec=args.start,
         end_sec=args.end,
     )
-    run(urls, options)
+    # `batch` learned this already; `analyze` had the identical hole and kept
+    # exiting 0 with every item errored, which is how a wrapper script can
+    # cheerfully carry on with nothing analysed.
+    return 1 if run(urls, options) else 0
 
 
 def _cmd_transcribe(args) -> None:
@@ -874,13 +868,26 @@ def _cmd_ingest(args) -> None:
         conn.close()
 
 
-def _cmd_batch(args) -> None:
+def _cmd_batch(args) -> Optional[int]:
+    """Analyze a list of reels. Returns 1 when the run did not fully land.
+
+    The exit code answers one question: did this command produce what it was
+    asked for? Not "whose fault was it". Every path below that prints an
+    explanation and produces no bundles returns 1, because a shell reading exit
+    0 is being told the work is done -- and a batch that silently reports
+    success over a hole is the entire family of bugs this release is about.
+
+    Two paths deliberately stay 0. `--dry-run` succeeded: the listing *is* the
+    deliverable. And a run whose items all landed but left `pending_completion`
+    is the designed terminal state of `--mode agent`, which SKILL.md recommends;
+    painting it red would make the recommended path permanently look broken.
+    """
     if args.doc:
         try:
             text = batch.fetch(args.doc)
         except (RuntimeError, OSError) as e:
             print(f"Error: {e}")
-            return
+            return 1
     elif args.src_file:
         with open(args.src_file, encoding="utf-8") as f:
             text = f.read()
@@ -891,9 +898,12 @@ def _cmd_batch(args) -> None:
     if args.limit:
         entries = entries[:args.limit]
     if not entries:
+        # The second line is the same remedy the fetch failure above prints,
+        # which is the tell: this state is usually a fetch that succeeded into a
+        # sign-in page rather than a genuinely empty list.
         print("No Instagram / TikTok / YouTube Shorts links found in that source.")
         print("  If it's a Google doc, check sharing is 'Anyone with the link - Viewer'.")
-        return
+        return 1
 
     print("Found %d:" % len(entries))
     for i, (label, url) in enumerate(entries, 1):
@@ -904,14 +914,20 @@ def _cmd_batch(args) -> None:
     print("\nVLM reachable: %s   Whisper: %s"
           % ("yes" if caps["vlm"] else "no", "yes" if caps["whisper"] else "no"))
     if mode is None:
+        # One of these messages says "That is a choice, not an error". It is
+        # right about blame and says nothing about state: nothing was analyzed.
+        # Exiting 0 here would tell a wrapper the batch is done, on the exact
+        # path a first-time user hits. The extra line keeps the message and the
+        # status from contradicting each other.
         print("\n" + msg)
-        return
+        print("\n(Nothing was analyzed, so this exits non-zero.)")
+        return 1
     print("Mode: %s" % mode)
 
     if args.dry_run:
         print("\n--dry-run: nothing was analyzed. Bundles would land in %s/<label>/"
               % args.out)
-        return
+        return None
 
     result = batch.run_batch(entries, args.out, mode,
                              max_mb=args.batch_max_mb, verbose=args.verbose,
@@ -930,6 +946,14 @@ def _cmd_batch(args) -> None:
         print("\n%d failed:" % len(result["failed"]))
         for e in result["failed"]:
             print("  %-14s %s\n                 %s" % (e["label"], e["url"], e["reason"]))
+    if result.get("not_attempted"):
+        print("\n%d never attempted (the run stopped early):"
+              % len(result["not_attempted"]))
+        for e in result["not_attempted"]:
+            print("  %-14s %s" % (e["label"], e["url"]))
+    if result["failed"] or result.get("not_attempted"):
+        return 1
+    return None
 
 
 def _cmd_skill(args) -> None:

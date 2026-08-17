@@ -102,6 +102,63 @@
   cause last, so the head shown was reliably the part carrying no information —
   an ffmpeg permission error sat past the cut behind five lines of build
   configuration. Both now report error-looking lines, falling back to the tail.
+- **A batch where every item failed exited 0.** Both `batch` and `analyze`
+  printed an explanation and returned `None`, so the dispatcher's
+  `if code: raise SystemExit(code)` never fired and a wrapper reading `$?` was
+  told the work was done. `analyze` also printed `Batch <id> completed.` on a run
+  where the only item had errored on the line above — "completed" on its own
+  reads as "worked", and it now says `completed with N/M failed.`, the same
+  distinction the MCP surface draws with `completed_with_failures`. A Ctrl-C is
+  deliberately still not counted: it leaves work undone too, but the operator
+  pressed it and the screen says so.
+- **One message stood in for four different reasons the vision fallback did not
+  run.** Whatever blocked it, the log said `fallback '<model>' unavailable`. On a
+  run whose backend was not ollama the first condition already settled it and the
+  availability probe was never called — so the line named a missing model that
+  was installed and answering, and acting on it means installing what is already
+  there. Each reason now says its own name, and the "not installed" one says
+  which host it looked at so the claim can be checked. The probe stays last,
+  because it is a network call and a cheaper reason usually settles the question.
+- **The console-encoding fix only ever ran on the CLI entry point.** `main()` in
+  `cli.py` called it; the MCP server did not, so a description carrying a
+  character the console could not encode took the server down instead of the
+  frame. It now runs on both, and the warning path degrades unencodable
+  characters rather than raising inside the warning itself.
+- **A leftover file at the destination let a download report success without
+  transferring a byte.** yt-dlp exits 0 when the target already exists, so a
+  truncated or unusable file from an earlier attempt was read as a completed
+  download. Unusable outputs are now renamed aside (`.unusable`, never deleted,
+  `.vtt` siblings moved with them) and success is judged on both the return code
+  and the file actually being there; the format fallback passes `--no-continue`
+  so it cannot resume a different format's partial file.
+- **Keyframes collapsed onto the opening seconds of a clip** (`scene` strategy,
+  the default). The cause was in the ffmpeg pass that *detects* scenes, not the
+  one that cuts them: `-frames:v N` makes ffmpeg exit after N outputs, so
+  detection stopped early and everything after that point was invisible to the
+  sampler. Measured before the change, 27 clips had a single unsampled gap larger
+  than half their length; measured after, across a library that had grown to 110,
+  one — and that one is a 22-second clip whose first 13 seconds are a single
+  unchanging shot, so there is nothing there to sample. Mean largest gap went
+  from 35.6% of clip length to 17.3%. Detection now runs unbounded and writes no
+  images at all (`-f null -`); the second pass seeks to each selected timestamp.
+  Selection
+  spreads across the time axis rather than the ordinal one, so a clip whose cuts
+  cluster at the front no longer spends its whole budget there. **The `motion`
+  strategy still has the same defect** — `_extract_motion` caps its emitting pass
+  with `-frames:v max_frames`, so it keeps the first N high-motion frames rather
+  than a spread. It is not the default and was left for its own change, since the
+  fix is the same two-pass restructure and deserves its own tests.
+- **A model that reasons before answering spent the entire token budget
+  reasoning.** At the old ceiling the reply came back `done_reason: "length"`
+  with zero characters, which downstream is indistinguishable from a frame with
+  nothing to say. Reasoning length varies far more than answer length — usually
+  around 440 tokens, with a tail well past 1200 — so raising the default further
+  is racing a distribution with no upper bound. A frame that hit the ceiling now
+  gets one retry at a larger budget; a frame that finished on its own does not,
+  because retrying it returns the same thing more slowly. `think: false` was
+  measured and does not work here (ollama 0.30.7 + qwen3-vl:8b keeps reasoning
+  and leaks a raw `<think>` tag). The warning that fires when even the retry came
+  back empty says how far it already got, so nobody raises a number twice.
 
 ### Notes
 
@@ -122,6 +179,20 @@
   everything the pipeline produced remains read-only over HTTP.
 ### Added
 
+- **Keyframe extraction is a run with an identity, so re-sampling is possible
+  without destroying the evidence it replaces.** Frames used to be tied to the
+  clip alone, which made "extract again with different settings" either
+  impossible or a deletion. A run (`keyframe_runs`, schema v12) owns its frames
+  and its descriptions; a new run supersedes the previous one instead of
+  overwriting it, everything downstream reads the current run, and the old frames
+  and their descriptions stay on disk to compare against. `--force-keyframes`
+  asks for a new run explicitly. Frames are committed only after they have landed,
+  so an interrupted extraction cannot leave a run pointing at files that are not
+  there.
+- **`retry_call`** — the retry helper had a decorator with no call sites and no
+  way to say *which* failures are worth retrying. It now takes a `should_retry`
+  predicate and an `on_retry` hook, and the decorator delegates to it. (It also
+  raised `None` when configured with zero attempts.)
 - **Near-duplicate keyframes are dropped instead of described.** `frame_cap`
   decides how many frames a clip may spend; this decides how many it actually
   needs. They fix different defects — the cap fixed "long clips sampled too

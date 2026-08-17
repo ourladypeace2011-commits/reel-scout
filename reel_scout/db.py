@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -45,9 +45,20 @@ CREATE TABLE IF NOT EXISTS transcripts (
     created_at      TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS keyframe_runs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id          TEXT REFERENCES videos(id),
+    strategy          TEXT,
+    requested_max     INTEGER,
+    selector_version  INTEGER DEFAULT 0,
+    superseded_at     TEXT,
+    created_at        TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS keyframes (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id        TEXT REFERENCES videos(id),
+    run_id          INTEGER REFERENCES keyframe_runs(id),
     frame_index     INTEGER,
     timestamp_sec   REAL,
     file_path       TEXT,
@@ -436,6 +447,62 @@ def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """Keyframe extractions become runs, so one can replace another (v11 -> v12).
+
+    Re-extracting used to be impossible: `analyze` skipped it whenever any
+    keyframe existed, which made `--keyframe-strategy` unreachable for anything
+    already in the library. Simply overwriting was not an option either -- the
+    scene extractor writes `<video_id>_scene_%03d.jpg` into the same directory
+    every time, so a second pass would replace run 1's images in place while
+    every row still pointed at the filename. Nothing deleted, and every old
+    description now describing a picture that is no longer there.
+
+    So an extraction gets an identity. New runs write into `r<run_id>/` and the
+    previous run is marked superseded rather than removed: its rows, its images
+    and the descriptions written against them all stay exactly where they are,
+    which is what lets an earlier analysis still be checked against what it
+    actually saw.
+
+    Existing rows are backfilled into one run per video at selector_version 0 --
+    0 meaning "sampled by the version that only ever looked at the opening".
+    That number is how a re-run can tell what still needs doing.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS keyframe_runs (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id          TEXT REFERENCES videos(id),
+            strategy          TEXT,
+            requested_max     INTEGER,
+            selector_version  INTEGER DEFAULT 0,
+            superseded_at     TEXT,
+            created_at        TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    try:
+        conn.execute("ALTER TABLE keyframes ADD COLUMN run_id INTEGER "
+                     "REFERENCES keyframe_runs(id)")
+    except sqlite3.OperationalError:
+        pass  # already there
+
+    rows = conn.execute(
+        "SELECT video_id, MIN(strategy) AS strategy, COUNT(*) AS n "
+        "FROM keyframes WHERE run_id IS NULL GROUP BY video_id"
+    ).fetchall()
+    for r in rows:
+        cur = conn.execute(
+            "INSERT INTO keyframe_runs (video_id, strategy, requested_max, "
+            "selector_version) VALUES (?,?,?,0)",
+            (r[0], r[1], r[2]),
+        )
+        conn.execute("UPDATE keyframes SET run_id = ? WHERE video_id = ? AND run_id IS NULL",
+                     (cur.lastrowid, r[0]))
+    conn.execute("UPDATE schema_version SET version = 12 WHERE version = 11")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         # `REEL_SCOUT_DATA` defaults to "./data", i.e. relative to wherever the
@@ -497,6 +564,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 10
         if current_ver < 11:
             _migrate_v10_to_v11(conn)
+            current_ver = 11
+        if current_ver < 12:
+            _migrate_v11_to_v12(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -721,17 +791,79 @@ def get_transcript(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.
 
 # --- Keyframe CRUD ---
 
+SELECTOR_VERSION = 1
+"""Bumped when the sampling itself changes, not when the code around it moves.
+
+0 is everything extracted before the detection pass stopped capping itself at
+the frame budget -- those runs only ever looked at a clip's opening, so
+"selector_version = 0" is the machine-checkable way to ask what still needs
+re-sampling.
+"""
+
+_CURRENT_RUN = (
+    "(k.run_id IS NULL OR k.run_id IN "
+    " (SELECT id FROM keyframe_runs WHERE superseded_at IS NULL))"
+)
+# `run_id IS NULL` counts as current on purpose: any writer that does not know
+# about runs still gets its frames read back. Losing rows to a filter they never
+# opted into would be a silent hole, which is the shape of bug this package
+# keeps paying for.
+
+
+def begin_keyframe_run(
+    conn: sqlite3.Connection,
+    video_id: str,
+    strategy: str,
+    requested_max: int,
+    selector_version: int = SELECTOR_VERSION,
+) -> int:
+    """Open a run and return its id. Supersedes nothing yet -- see commit."""
+    cur = conn.execute(
+        "INSERT INTO keyframe_runs (video_id, strategy, requested_max, selector_version) "
+        "VALUES (?,?,?,?)",
+        (video_id, strategy, requested_max, selector_version),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def commit_keyframe_run(conn: sqlite3.Connection, run_id: int, video_id: str) -> None:
+    """Make `run_id` the current one, superseding this video's earlier runs.
+
+    Deliberately separate from `begin_keyframe_run` and called only once frames
+    are actually on disk. Superseding first would mean an extraction that dies
+    halfway leaves the video with no current run at all -- old evidence retired
+    before new evidence exists, which is worse than either state on its own.
+    """
+    conn.execute(
+        "UPDATE keyframe_runs SET superseded_at = datetime('now') "
+        "WHERE video_id = ? AND id != ? AND superseded_at IS NULL",
+        (video_id, run_id),
+    )
+    conn.commit()
+
+
+def current_keyframe_run(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM keyframe_runs WHERE video_id = ? AND superseded_at IS NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (video_id,),
+    ).fetchone()
+
+
 def save_keyframes(
     conn: sqlite3.Connection,
     video_id: str,
     keyframes: List[Dict[str, Any]],
+    run_id: Optional[int] = None,
 ) -> List[int]:
     ids = []
     for kf in keyframes:
         cur = conn.execute(
-            """INSERT INTO keyframes (video_id, frame_index, timestamp_sec, file_path, strategy)
-               VALUES (?,?,?,?,?)""",
-            (video_id, kf["frame_index"], kf["timestamp_sec"],
+            """INSERT INTO keyframes (video_id, run_id, frame_index, timestamp_sec,
+                                      file_path, strategy)
+               VALUES (?,?,?,?,?,?)""",
+            (video_id, run_id, kf["frame_index"], kf["timestamp_sec"],
              kf["file_path"], kf["strategy"]),
         )
         ids.append(cur.lastrowid)
@@ -739,11 +871,13 @@ def save_keyframes(
     return ids
 
 
-def get_keyframes(conn: sqlite3.Connection, video_id: str) -> List[sqlite3.Row]:
-    return conn.execute(
-        "SELECT * FROM keyframes WHERE video_id = ? ORDER BY timestamp_sec",
-        (video_id,),
-    ).fetchall()
+def get_keyframes(
+    conn: sqlite3.Connection, video_id: str, include_superseded: bool = False
+) -> List[sqlite3.Row]:
+    sql = "SELECT k.* FROM keyframes k WHERE k.video_id = ?"
+    if not include_superseded:
+        sql += " AND " + _CURRENT_RUN
+    return conn.execute(sql + " ORDER BY k.timestamp_sec", (video_id,)).fetchall()
 
 
 def get_keyframes_with_descriptions(
@@ -757,7 +891,7 @@ def get_keyframes_with_descriptions(
                   vd.description, vd.text_in_frame, vd.objects_json
            FROM keyframes k
            LEFT JOIN vision_descriptions vd ON vd.keyframe_id = k.id
-           WHERE k.video_id = ?
+           WHERE k.video_id = ? AND """ + _CURRENT_RUN + """
            ORDER BY k.timestamp_sec""",
         (video_id,),
     ).fetchall()
@@ -769,7 +903,7 @@ def get_described_keyframe_ids(conn: sqlite3.Connection, video_id: str) -> set:
     rows = conn.execute(
         """SELECT vd.keyframe_id FROM vision_descriptions vd
            JOIN keyframes k ON k.id = vd.keyframe_id
-           WHERE k.video_id = ?""",
+           WHERE k.video_id = ? AND """ + _CURRENT_RUN,
         (video_id,),
     ).fetchall()
     return {r[0] for r in rows}

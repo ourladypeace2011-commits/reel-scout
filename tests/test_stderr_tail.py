@@ -103,3 +103,24 @@ def test_empty_input_is_safe():
     assert tail_stderr("") == ""
     assert tail_stderr(None) == ""
     assert tail_stderr("   \n  \n") == ""
+
+
+# --- the entry points that were not protected ---------------------------------
+
+
+def test_the_mcp_server_fixes_its_console_before_serving():
+    """`force_utf8_stdio` lived in cli.py and ran only from the CLI.
+
+    The MCP server is how the Windows students reach this package -- no terminal,
+    Claude Desktop, whatever codepage the host hands it -- and it never called
+    the fix. Worse, `tools.py` wraps the pipeline in `redirect_stdout(sys.stderr)`
+    to keep pipeline chatter off the JSON-RPC channel, which is precisely what
+    lands that chatter on the stream nobody had fixed.
+    """
+    import inspect
+
+    from reel_scout.mcp import server
+
+    src = inspect.getsource(server.main)
+    assert "force_utf8_stdio()" in src, (
+        "the MCP entry point must fix its console like the CLI one does")

@@ -92,12 +92,14 @@ class PipelineOptions:
     vlm_model: Optional[str] = None
     keyframe_strategy: Optional[str] = None
     keyframe_max: Optional[int] = None
+    force_keyframes: bool = False
     resolution: int = 0       # 招④ keyframe upscale long-edge px (0 = native)
     start_sec: float = 0.0    # 招③ focus window start (0 = whole clip)
     end_sec: float = 0.0      # 招③ focus window end (0 = whole clip)
 
 
-def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
+def run(urls: List[str], options: Optional[PipelineOptions] = None) -> int:
+    """Run the pipeline over `urls`. Returns how many items errored."""
     if options is None:
         options = PipelineOptions()
 
@@ -133,6 +135,7 @@ def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
     original_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, _on_interrupt)
 
+    errors = 0
     try:
         pending = db.get_pending_batch_items(conn, batch_id)
         total = len(pending)
@@ -150,15 +153,89 @@ def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
                 db.update_batch_item(conn, batch_id, url, "done", video_id=video_id)
                 print(f"  Done: {video_id}")
             except Exception as e:
+                errors += 1
                 db.update_batch_item(conn, batch_id, url, "error", error=str(e))
                 print(f"  Error: {e}")
 
         if not interrupted[0]:
             db.mark_batch_completed(conn, batch_id)
-            print(f"\nBatch {batch_id} completed.")
+            # "completed" on its own reads as "worked". A batch where every
+            # item raised printed exactly that line and exited 0 -- which is
+            # how two clips sat undescribed while the run looked clean. Same
+            # distinction the MCP surface already draws with
+            # `completed_with_failures`; the CLI should not disagree with it.
+            if errors:
+                print(f"\nBatch {batch_id} completed with {errors}/{total} failed.")
+            else:
+                print(f"\nBatch {batch_id} completed.")
     finally:
         signal.signal(signal.SIGINT, original_handler)
         conn.close()
+
+    # Deliberately not counting the interrupt: a Ctrl-C also leaves work undone,
+    # but that is the operator's own doing and it already says so on screen.
+    # Folding it in here would change what an exit code means for a case nobody
+    # complained about, so it stays a separate decision.
+    return errors
+
+
+def fallback_blocked_because(backend, fallback_model, primary_model,
+                             base_url, model_available) -> str:
+    """Why the vision fallback will not run, or "" when it will.
+
+    Four separate things can block it, and the message used to name only the
+    last one: whatever the reason, the log said
+    `fallback 'qwen3-vl:8b' unavailable`. On a run whose backend was simply not
+    ollama that sentence is false -- the model is installed and answering, two
+    lines away in `ollama list` -- and the person reading it goes and installs
+    what is already there. One message for four causes is no message.
+
+    Order matters: the availability probe is a network call, so it stays last
+    and is skipped whenever a cheaper reason already settles the question.
+    """
+    if backend != "ollama":
+        return ("the fallback only runs on the ollama backend, and this run "
+                "used '%s'" % backend)
+    if not fallback_model:
+        return "no VLM_FALLBACK_MODEL is configured"
+    if fallback_model == primary_model:
+        return "fallback '%s' is the model that just failed" % fallback_model
+    if not model_available(base_url, fallback_model):
+        return "fallback '%s' is not installed at %s" % (fallback_model, base_url)
+    return ""
+
+
+def _wants_new_sampling(conn, video_id: str, options: "PipelineOptions") -> bool:
+    """Should this run re-extract keyframes for a clip that already has some?
+
+    Two triggers, and the scoping of the second one is the whole point.
+
+    `--force-keyframes` is the blunt one: same settings, new selector, do it
+    again. It exists because the flag cannot be inferred -- after the sampling
+    logic itself changes, nothing about the request looks different.
+
+    The other fires when this invocation *explicitly asked* for a strategy or a
+    budget that does not match what is on record. Compared against what was
+    typed, never against the resolved value: `keyframe_strategy` defaults to
+    None and resolves to `config.KEYFRAME_STRATEGY`, an environment variable, so
+    comparing resolved values would mean anyone who changes that variable -- or
+    upgrades into a release with a different default -- silently re-extracts the
+    whole library and spends a VLM call on every frame of it.
+
+    Stored `requested_max` is what was asked for, not what was produced: dedupe
+    and the first/last guarantee both move the final count, so comparing against
+    the number of rows would fire forever on clips that simply deduped well.
+    """
+    if options.force_keyframes:
+        return True
+    run = db.current_keyframe_run(conn, video_id)
+    if run is None:
+        return False
+    if options.keyframe_strategy and options.keyframe_strategy != run["strategy"]:
+        return True
+    if options.keyframe_max and options.keyframe_max != (run["requested_max"] or 0):
+        return True
+    return False
 
 
 def _process_single(
@@ -313,16 +390,32 @@ def _process_single(
     # that lacks one, whether or not extraction happened this run, so a failed or
     # partial VLM pass can be backfilled by re-running analyze.
     existing_kf = db.get_keyframes(conn, video_id)
-    if existing_kf:
+    if existing_kf and not _wants_new_sampling(conn, video_id, options):
         print("  Keyframes already extracted")
         frames = [(kf["id"], kf["file_path"]) for kf in existing_kf]
     else:
-        print("  Extracting keyframes...")
+        if existing_kf:
+            print("  Re-extracting keyframes (previous run kept, superseded)...")
+        else:
+            print("  Extracting keyframes...")
+        strategy = options.keyframe_strategy or ""
+        requested_max = options.keyframe_max or 0
+        run_id = db.begin_keyframe_run(
+            conn, video_id, strategy or config.KEYFRAME_STRATEGY, requested_max)
+
+        # Every run after the first writes into its own directory. The scene
+        # extractor names files `<video_id>_scene_%03d.jpg` and passes `-y`, so
+        # sharing a directory would have a second run overwriting the first run's
+        # images while its rows still pointed at them -- no file deleted, and
+        # every earlier description now describing a picture that is gone. Run 1
+        # keeps the flat path so nothing already stored has to move.
         kf_dir = os.path.join(config.KEYFRAMES_DIR, video_id)
+        if existing_kf:
+            kf_dir = os.path.join(kf_dir, "r%d" % run_id)
         kf_infos = extract_keyframes(
             file_path, kf_dir, video_id,
-            strategy=options.keyframe_strategy or "",
-            max_frames=options.keyframe_max or 0,  # 0 -> 招② auto budget
+            strategy=strategy,
+            max_frames=requested_max,              # 0 -> 招② auto budget
             resolution=options.resolution,         # 招④
             start_sec=options.start_sec,            # 招③
             end_sec=options.end_sec,                # 招③
@@ -332,8 +425,16 @@ def _process_single(
              "file_path": kf.file_path, "strategy": kf.strategy}
             for kf in kf_infos
         ]
-        kf_ids = db.save_keyframes(conn, video_id, kf_data)
-        frames = list(zip(kf_ids, [kf.file_path for kf in kf_infos]))
+        kf_ids = db.save_keyframes(conn, video_id, kf_data, run_id=run_id)
+        if kf_infos:
+            # Only now, with frames actually on disk. Superseding first would
+            # leave a video with no current run at all if extraction died here.
+            db.commit_keyframe_run(conn, run_id, video_id)
+            frames = list(zip(kf_ids, [kf.file_path for kf in kf_infos]))
+        else:
+            print("  Extraction produced no frames — keeping the previous run",
+                  file=sys.stderr)
+            frames = [(kf["id"], kf["file_path"]) for kf in existing_kf]
 
     if options.skip_vision:
         print("  Skipping VLM descriptions — %d keyframe(s) extracted and waiting "
@@ -380,11 +481,11 @@ def _process_single(
             if failed:
                 fb = config.VLM_FALLBACK_MODEL
                 from ..vision.ollama import model_available, OllamaVLM
-                use_fb = (
-                    backend == "ollama" and fb and fb != primary_model
-                    and model_available(config.OLLAMA_BASE_URL, fb)
+                why = fallback_blocked_because(
+                    backend, fb, primary_model,
+                    config.OLLAMA_BASE_URL, model_available,
                 )
-                if use_fb:
+                if not why:
                     print(f"  {len(failed)} frame(s) failed; retrying with fallback {fb}...")
                     fb_vlm = OllamaVLM(base_url=config.OLLAMA_BASE_URL, model=fb)
                     for kf_id, path in failed:
@@ -397,8 +498,8 @@ def _process_single(
                             _persist(kf_id, desc, fb)
                 else:
                     print(
-                        f"  {len(failed)} frame(s) failed; fallback "
-                        f"'{fb or '(none)'}' unavailable — left empty for a later vision retry",
+                        f"  {len(failed)} frame(s) failed; {why} — "
+                        f"left empty for a later vision retry",
                         file=sys.stderr,
                     )
 

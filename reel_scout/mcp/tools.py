@@ -1205,10 +1205,24 @@ def _spawn_worker(batch_id: str, log_path: str) -> int:
 
 
 def _batch_state(row: Any, has_pending: bool) -> str:
-    """What to call a batch, given that nothing marks a killed worker's row."""
+    """What to call a batch, given that nothing marks a killed worker's row.
+
+    `completed_with_failures` is derived here rather than stored, for the same
+    reason `stalled` is: the facts are already in the row, only the vocabulary
+    reading them was missing. Deriving it also makes it structurally impossible
+    to collide with `failed`, which means and only means "the worker died" --
+    and the two must never be confused, because one is a hole in the results and
+    the other is a hole in the run.
+
+    The counter this reads has been correct all along. `mark_batch_completed`
+    simply never consulted it, so a batch whose every item failed reported
+    `completed` with `counts.failed: N` sitting right beside it, ignored.
+    """
     import datetime
 
     status = row["status"] or "running"
+    if status == "completed" and (row["failed"] or 0) > 0:
+        return "completed_with_failures"
     if status != "running":
         return status
     beat = row["heartbeat_at"]
@@ -1367,6 +1381,28 @@ def _tool_batch_status(args: Dict[str, Any]) -> Dict[str, Any]:
             )
         elif state == "cancelled":
             payload["note"] = "Cancelled. Everything already finished is listed above."
+        elif state == "completed_with_failures":
+            payload["note"] = (
+                "Finished, but %d of %d item(s) failed and produced no bundle; each "
+                "reason is in `failed`. The worker ran to the end -- this is not a "
+                "crash, and the bundles in `done` are complete."
+                % (len(failed), len(items))
+            )
+        elif state == "incomplete":
+            payload["note"] = (
+                "Stopped at the deadline with %d item(s) never attempted (listed in "
+                "`pending`). They did not fail -- they were never tried. Everything "
+                "in `done` is on disk and complete." % len(pending)
+            )
+        elif state == "failed":
+            # This branch was missing entirely, so a `failed` reply was a bare
+            # word: the one state that means "something went wrong in a way we
+            # did not anticipate" was also the one that explained itself least.
+            payload["note"] = (
+                "The worker process died. The %d item(s) in `done` are safe; the "
+                "rest were not attempted. The traceback is at %s."
+                % (len(done), os.path.join(out_root or "<out_root>", "batch.log"))
+            )
         return _text_result(payload)
     finally:
         conn.close()

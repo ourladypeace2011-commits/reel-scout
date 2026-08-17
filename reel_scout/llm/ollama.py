@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import socket
-import time
 import urllib.error
 import urllib.request
 
 from .. import config
+from ..utils.retry import retry_call
 from ..utils.stderr import warn
 from .base import BaseLLM
 
@@ -60,36 +60,45 @@ class OllamaLLM(BaseLLM):
             data=data,
             headers={"Content-Type": "application/json"},
         )
-        # Retry timeouts with backoff. Everything else is raised on the first
-        # attempt — see _is_timeout for why.
         attempts = max(1, config.LLM_MAX_RETRIES + 1)
-        for i in range(attempts):
-            try:
-                with urllib.request.urlopen(req, timeout=config.LLM_TIMEOUT) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                if "response" not in result:
-                    # A 200 whose body is not a generate response: an error
-                    # envelope, a proxy in front of Ollama, a schema that moved.
-                    # An empty `response` is legitimate (the model produced
-                    # nothing); a *missing* one means this is not the reply we
-                    # think it is, and returning "" for it hands the merger an
-                    # empty result that looks like a successful call. Not raised,
-                    # because some compatible backends may legitimately differ
-                    # and a hard error would break a setup that works today.
-                    keys = ", ".join(sorted(result)) or "none"
-                    warn(
-                        "  LLM returned 200 with no 'response' field"
-                        " (keys: %s); treating as empty" % keys
-                    )
-                return result.get("response", "")
-            except Exception as exc:  # noqa: BLE001
-                last = i == attempts - 1
-                if last or not _is_timeout(exc):
-                    raise
-                wait = config.LLM_RETRY_BACKOFF * (2 ** i)
+
+        def _once() -> str:
+            with urllib.request.urlopen(req, timeout=config.LLM_TIMEOUT) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            if "response" not in result:
+                # A 200 whose body is not a generate response: an error
+                # envelope, a proxy in front of Ollama, a schema that moved.
+                # An empty `response` is legitimate (the model produced
+                # nothing); a *missing* one means this is not the reply we
+                # think it is, and returning "" for it hands the merger an
+                # empty result that looks like a successful call. Not raised,
+                # because some compatible backends may legitimately differ
+                # and a hard error would break a setup that works today.
+                keys = ", ".join(sorted(result)) or "none"
                 warn(
-                    "  LLM timed out after %gs (attempt %d/%d); retrying in %gs"
-                    % (config.LLM_TIMEOUT, i + 1, attempts, wait)
+                    "  LLM returned 200 with no 'response' field"
+                    " (keys: %s); treating as empty" % keys
                 )
-                time.sleep(wait)
-        raise AssertionError("unreachable")  # pragma: no cover
+            return result.get("response", "")
+
+        def _announce(exc: BaseException, attempt: int, wait: float) -> None:
+            warn(
+                "  LLM timed out after %gs (attempt %d/%d); retrying in %gs"
+                % (config.LLM_TIMEOUT, attempt, attempts, wait)
+            )
+
+        # Timeouts retry with backoff; everything else raises on the first
+        # attempt -- see _is_timeout for why that distinction cannot be made
+        # with an exception-type tuple, which is what put the retry policy in
+        # utils.retry rather than beside it.
+        #
+        # retry_call, not the @retry decorator: these settings come from config
+        # at call time, and a decorator would freeze them at import.
+        return retry_call(
+            _once,
+            max_attempts=attempts,
+            delay=config.LLM_RETRY_BACKOFF,
+            backoff=2.0,
+            should_retry=_is_timeout,
+            on_retry=_announce,
+        )

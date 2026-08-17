@@ -12,6 +12,32 @@ import sys
 from typing import Optional
 
 
+def force_utf8_stdio() -> None:
+    """Print UTF-8 regardless of the console's codepage.
+
+    Python encodes stdout with the locale codepage, which on Windows is cp950
+    (zh-TW), cp1252 (US/EU) or cp437 (legacy cmd). None of them can encode the
+    emoji that short-form titles are full of, and cp437 cannot even encode the
+    em dash this package prints throughout -- so `show` died on a traceback
+    before it could list the keyframe paths that Step 2b needs. Replacement
+    characters are a bad look; a UnicodeEncodeError is a broken tool.
+
+    This lived in ``cli.py`` and ran only from the CLI entry point, which left
+    every other way into this package unprotected -- including the MCP server,
+    which is how the Windows students reach it with no terminal at all.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            # pytest's capture and anything else that swaps in a plain buffer.
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # Detached or already-closed stream; printing is not our job to fix.
+            pass
+
+
 def warn(message: str) -> None:
     """Print to stderr without letting the console's codepage kill the caller.
 
