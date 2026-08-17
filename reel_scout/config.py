@@ -126,6 +126,32 @@ LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 # Seconds before the first retry; each further retry doubles it. Backoff matters
 # because the thing being waited out is another process holding the model.
 LLM_RETRY_BACKOFF = float(os.getenv("LLM_RETRY_BACKOFF", "5"))
+# --- batch step timeouts ---
+#
+# Always on, because the failure they prevent is a batch that never ends rather
+# than one that ends badly. `batch.py` had no timeout on its child steps at all,
+# so a wedged ffmpeg or a stuck model blocked every remaining clip for as long
+# as the machine stayed up.
+#
+# `analyze` sits just under the 1815s worst case documented above for a single
+# merge that burns its whole retry budget: a call spending half an hour on
+# retries IS the pathology, and letting the batch move on is the right trade.
+BATCH_ANALYZE_TIMEOUT = float(os.getenv("BATCH_ANALYZE_TIMEOUT", "1800"))
+BATCH_EXPORT_TIMEOUT = float(os.getenv("BATCH_EXPORT_TIMEOUT", "300"))
+
+
+def batch_score_timeout() -> float:
+    """Derived, never a flat number.
+
+    `score` is one LLM call, so its subprocess timeout has to stay strictly
+    larger than the backend's own -- otherwise the kill pre-empts the in-process
+    error path and the existing retry loses the diagnosis it was there to give.
+    Someone who sets LLM_TIMEOUT=1800 and gets their scoring child killed at a
+    hardcoded 1200 has a bad afternoon and no idea why.
+    """
+    return float(os.getenv("BATCH_SCORE_TIMEOUT", "0")) or (LLM_TIMEOUT * 2 + 60)
+
+
 OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
 OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "")
 

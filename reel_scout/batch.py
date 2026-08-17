@@ -26,8 +26,10 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 import unicodedata
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -220,15 +222,98 @@ def self_cmd(*args: str) -> List[str]:
     return [sys.executable, "-m", "reel_scout.cli"] + list(args)
 
 
-def _run(cmd: Sequence[str], verbose: bool) -> int:
+TIMED_OUT = 124
+"""What `timeout(1)` returns, reused so a hang and a crash can be told apart.
+
+The reason string reaching `batch_items.error_message` and the MCP `failed[]`
+list is the whole point of the distinction: "timed out after 1800s" and "exited
+non-zero" ask the operator to do completely different things.
+"""
+
+
+def _run(cmd: Sequence[str], verbose: bool, timeout: Optional[float] = None) -> int:
+    """Run a child step, killing its whole process group if it overruns.
+
+    `subprocess.run(..., stdout=PIPE, timeout=T)` cannot be used here, and the
+    reason is worth stating because it fails in the worst possible way: on
+    timeout it kills the *child* and then calls `communicate()`, which blocks
+    until the pipe closes -- and the pipe does not close, because `analyze`'s
+    grandchildren (ffmpeg, yt-dlp, whisper) inherited that same stdout handle.
+    The timeout support would hang inside its own timeout handler, which is
+    indistinguishable from the hang it was added to prevent.
+
+    So: a new session, and a kill aimed at the group. `mcp/tools.py`'s
+    `_spawn_worker` already carries the platform split this copies.
+    """
     if verbose:
         print("    $ " + " ".join(cmd))
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    popen_kw = {}
+    if os.name == "nt":  # pragma: no cover - exercised on Windows only
+        popen_kw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kw["start_new_session"] = True
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **popen_kw)
+    try:
+        out_bytes, _ = proc.communicate(timeout=timeout)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        out_bytes, _ = proc.communicate()
+        rc = TIMED_OUT
     if verbose:
-        out = proc.stdout.decode("utf-8", errors="replace").strip()
+        out = (out_bytes or b"").decode("utf-8", errors="replace").strip()
         if out:
             print("      " + out.replace("\n", "\n      "))
-    return proc.returncode
+    return rc
+
+
+def _kill_group(proc: "subprocess.Popen") -> None:
+    """Take the grandchildren with it, and never take ourselves.
+
+    Killing only the child leaves ffmpeg running and still holding the pipe,
+    which is how a timeout turns into a permanent block -- hence the group kill.
+
+    But a group kill aimed at the wrong group is catastrophic in a way an
+    ordinary bug is not: if the child ever shares our process group, SIGKILL
+    reaches this process, its parent, and whatever launched them, with no
+    traceback and no exit message. `start_new_session=True` above is supposed to
+    prevent that, and this check is here because "supposed to" is not a strong
+    enough guarantee for an operation that cannot be undone or observed. Read the
+    group and compare before firing; fall back to killing just the child, which
+    is a smaller failure than killing the batch.
+    """
+    if os.name == "nt":  # pragma: no cover - exercised on Windows only
+        proc.kill()
+        return
+    pgid = _group_to_kill(proc)
+    if pgid is None:
+        proc.kill()
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        proc.kill()
+
+
+def _group_to_kill(proc: "subprocess.Popen") -> Optional[int]:
+    """The child's process group, or None when killing it would kill us too.
+
+    Split out from the kill so the decision can be tested without anyone having
+    to actually fire a SIGKILL at their own process group to find out. That is
+    not hypothetical: the guard was added after a mutation run set
+    `start_new_session=False`, and the resulting group kill took down the test
+    process, its parent, and the harness above them -- with no traceback,
+    because there was nobody left to print one. The tooling then re-ran against
+    a file it had never restored.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        return None
+    return None if pgid == os.getpgid(0) else pgid
 
 
 def _video_ids(conn) -> Set[str]:
@@ -272,10 +357,24 @@ def has_score(conn, video_id: str) -> bool:
     return row is not None
 
 
+
+
+def _step_failure(step: str, rc: int, timeout: float) -> str:
+    """What to record when a child step did not succeed.
+
+    A hang and a crash want different responses from whoever reads this, and
+    until now both arrived as "exited non-zero".
+    """
+    if rc == TIMED_OUT:
+        return "%s timed out after %gs" % (step, timeout)
+    return "%s exited non-zero" % step
+
+
 def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
               max_mb: str = "25", verbose: bool = False,
               on_progress: Optional[Callable[[Dict[str, Any]], Any]] = None,
               score: bool = True,
+              deadline_sec: float = 0.0,
               ) -> Dict[str, Any]:
     """Analyze and bundle every entry. Returns the manifest it also writes.
 
@@ -311,12 +410,28 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
     failed: List[Dict[str, str]] = []
     pending: List[Dict[str, str]] = []
     cancelled = False
+    deadline_hit = False
+    not_attempted: List[Dict[str, str]] = []
+
+    # monotonic, not wall clock: an NTP correction must not move the deadline.
+    started = time.monotonic()
 
     for i, (label, url) in enumerate(entries, 1):
         slug = slugify(label, i)
+        # Checked here and nowhere else, matching the cancel contract exactly:
+        # half an analysis is worse than one more finished video. Overshoot is
+        # therefore bounded by one item, not by the deadline.
+        if deadline_sec and (time.monotonic() - started) > deadline_sec:
+            deadline_hit = True
+            not_attempted = [{"label": lb, "url": u} for lb, u in entries[i - 1:]]
+            print("\n  Deadline reached after %d/%d — %d not attempted"
+                  % (i - 1, len(entries), len(not_attempted)))
+            emit("deadline", attempted=i - 1, remaining=len(not_attempted))
+            break
         if emit("item_start", index=i, total=len(entries),
                 label=label, slug=slug, url=url) == "cancel":
             cancelled = True
+            not_attempted = [{"label": lb, "url": u} for lb, u in entries[i - 1:]]
             break
         print("\n[%d/%d] %s" % (i, len(entries), label or slug))
         print("    %s" % url)
@@ -325,10 +440,12 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
         cmd = self_cmd("analyze", url)
         if mode != "full":
             cmd.append("--skip-vision")
-        if _run(cmd, verbose) != 0:
-            print("    x analyze failed")
-            failed.append({"label": label, "url": url, "reason": "analyze exited non-zero"})
-            emit("item_failed", url=url, label=label, reason="analyze exited non-zero")
+        rc = _run(cmd, verbose, timeout=config.BATCH_ANALYZE_TIMEOUT)
+        if rc != 0:
+            reason = _step_failure("analyze", rc, config.BATCH_ANALYZE_TIMEOUT)
+            print("    x %s" % reason)
+            failed.append({"label": label, "url": url, "reason": reason})
+            emit("item_failed", url=url, label=label, reason=reason)
             continue
 
         vid = resolve_video_id(conn, before, url)
@@ -346,11 +463,14 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
 
         dest = os.path.join(out_root, slug)
         emit("item_exporting", url=url, video_id=vid, bundle_dir=dest)
-        if _run(self_cmd("export", "--format", "bundle", "--video", vid,
-                          "-o", dest, "--max-mb", str(max_mb)), verbose) != 0:
-            print("    x export failed")
-            failed.append({"label": label, "url": url, "reason": "export exited non-zero"})
-            emit("item_failed", url=url, label=label, reason="export exited non-zero")
+        rc = _run(self_cmd("export", "--format", "bundle", "--video", vid,
+                           "-o", dest, "--max-mb", str(max_mb)), verbose,
+                  timeout=config.BATCH_EXPORT_TIMEOUT)
+        if rc != 0:
+            reason = _step_failure("export", rc, config.BATCH_EXPORT_TIMEOUT)
+            print("    x %s" % reason)
+            failed.append({"label": label, "url": url, "reason": reason})
+            emit("item_failed", url=url, label=label, reason=reason)
             continue
 
         entry["bundle_dir"] = dest
@@ -371,7 +491,10 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
     # work is the one that pays the model load, and that is exactly the call
     # observed hitting the backend's timeout. The same reel scored in under two
     # minutes once the model was warm.
-    if score and mode == "full" and not cancelled:
+    # Gated on the deadline for the same reason it is gated on cancel: the run
+    # was told to stop, and a scoring pass over everything finished so far is
+    # not a smaller version of stopping.
+    if score and mode == "full" and not cancelled and not deadline_hit:
         todo = [e for e in done if not has_score(conn, e["video_id"])]
         if todo:
             print("\nScoring %d reel(s)..." % len(todo))
@@ -379,11 +502,13 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
             rescored = []
             for e in todo:
                 emit("item_scoring", url=e["url"], video_id=e["video_id"])
-                ok = _run(self_cmd("score", e["video_id"]), verbose) == 0
+                ok = _run(self_cmd("score", e["video_id"]), verbose,
+                          timeout=config.batch_score_timeout()) == 0
                 if not ok:
                     print("    ... scoring %s timed out or failed, retrying once"
                           % (e["label"] or e["slug"]))
-                    ok = _run(self_cmd("score", e["video_id"]), verbose) == 0
+                    ok = _run(self_cmd("score", e["video_id"]), verbose,
+                          timeout=config.batch_score_timeout()) == 0
                 if ok:
                     rescored.append(e)
                     emit("item_scored", url=e["url"], video_id=e["video_id"])
@@ -398,12 +523,21 @@ def run_batch(entries: List[Tuple[str, str]], out_root: str, mode: str,
             # exactly the ones that gained a score.
             for e in rescored:
                 _run(self_cmd("export", "--format", "bundle", "--video", e["video_id"],
-                              "-o", e["bundle_dir"], "--max-mb", str(max_mb)), verbose)
+                              "-o", e["bundle_dir"], "--max-mb", str(max_mb)), verbose,
+                     timeout=config.BATCH_EXPORT_TIMEOUT)
 
     conn.close()
     result = {"mode": mode, "done": done, "failed": failed, "pending_completion": pending}
+    # Conditional, exactly like `cancelled` already was. A clean run keeps the
+    # four-key manifest byte-identical, which is what `test_batch.py`'s exact
+    # keyset assertion guards -- and that assertion is the only thing stopping
+    # this schema from growing by accretion.
     if cancelled:
         result["cancelled"] = True
+    if deadline_hit:
+        result["deadline_exceeded"] = True
+    if not_attempted:
+        result["not_attempted"] = not_attempted
     with open(os.path.join(out_root, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     emit("batch_done", result=result, cancelled=cancelled)

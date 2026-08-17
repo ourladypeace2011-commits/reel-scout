@@ -159,6 +159,30 @@
   measured and does not work here (ollama 0.30.7 + qwen3-vl:8b keeps reasoning
   and leaks a raw `<think>` tag). The warning that fires when even the retry came
   back empty says how far it already got, so nobody raises a number twice.
+- **One wedged step could block a batch for as long as the machine stayed up.**
+  `batch.py` ran its child steps with no timeout at all, so a stuck ffmpeg or a
+  model that never answered held every remaining clip behind it — and the run
+  looked busy the whole time, which is the worst shape a stall can take. Each
+  step now has its own deadline and the batch has one overall: `analyze` at
+  1800s (just under the 1815s worst case a single merge can spend burning its
+  full retry budget — a call that reaches that number *is* the pathology),
+  `export` at 300s, and `score` derived from `LLM_TIMEOUT` rather than fixed,
+  because a subprocess kill that pre-empts the backend's own error path throws
+  away the diagnosis the retry existed to produce.
+- **A run stopped by the clock reported the same thing as a run that finished.**
+  `incomplete` is now its own state, separate from `completed` (the list was not
+  finished), `failed` (the worker did its job) and `completed_with_failures`
+  (nothing failed). Folding it into any of those asks the reader either to
+  re-run URLs that are fine or to assume URLs are fine when nobody looked at
+  them; the payload now names which were never attempted.
+- **The timeout could kill the process that was enforcing it.** Steps run in
+  their own process group so a wedged grandchild dies with its parent, but a
+  naive `killpg` on a process that was never detached reaches the whole tree
+  including the runner. The kill now resolves which group it may signal and
+  refuses to touch its own. (This was found by mutation testing, and the
+  mutation that found it took down the tool chain that was running it — the
+  file stayed mutated, so every later run silently tested code nobody wrote.
+  The runner now restores on startup as well as in `finally`.)
 
 ### Notes
 

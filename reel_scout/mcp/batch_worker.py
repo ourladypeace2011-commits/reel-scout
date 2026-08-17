@@ -128,9 +128,16 @@ def run(batch_id: str) -> int:
             return 1
         if result.get("cancelled"):
             db.set_batch_meta(conn, batch_id, status="cancelled")
+        elif result.get("deadline_exceeded"):
+            db.set_batch_meta(conn, batch_id, status="incomplete")
         else:
             # mark_batch_completed owns the 'completed' status; calling
             # set_batch_meta after it would just overwrite what it set.
+            #
+            # Deliberately still unconditional on failures. The question this
+            # answers is "did the run finish", and whether the *items* succeeded
+            # is a different question the reader derives from the counters --
+            # see `_batch_state`. One status cannot honestly carry both.
             db.mark_batch_completed(conn, batch_id)
         return 0
     finally:
