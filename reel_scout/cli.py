@@ -511,13 +511,13 @@ def _cmd_crawl(args) -> None:
     conn.close()
 
 
-def _cmd_analyze(args) -> None:
+def _cmd_analyze(args):
     from .analyze.pipeline import PipelineOptions, run
 
     urls = _collect_urls(args)
     if not urls and not args.resume:
         print("No URLs provided. Use: reel-scout analyze <url> or --file urls.txt")
-        return
+        return 1
 
     options = PipelineOptions(
         skip_vision=args.skip_vision,
@@ -536,7 +536,10 @@ def _cmd_analyze(args) -> None:
         start_sec=args.start,
         end_sec=args.end,
     )
-    run(urls, options)
+    # `batch` learned this already; `analyze` had the identical hole and kept
+    # exiting 0 with every item errored, which is how a wrapper script can
+    # cheerfully carry on with nothing analysed.
+    return 1 if run(urls, options) else 0
 
 
 def _cmd_transcribe(args) -> None:
