@@ -98,7 +98,8 @@ class PipelineOptions:
     end_sec: float = 0.0      # 招③ focus window end (0 = whole clip)
 
 
-def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
+def run(urls: List[str], options: Optional[PipelineOptions] = None) -> int:
+    """Run the pipeline over `urls`. Returns how many items errored."""
     if options is None:
         options = PipelineOptions()
 
@@ -134,6 +135,7 @@ def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
     original_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, _on_interrupt)
 
+    errors = 0
     try:
         pending = db.get_pending_batch_items(conn, batch_id)
         total = len(pending)
@@ -151,15 +153,56 @@ def run(urls: List[str], options: Optional[PipelineOptions] = None) -> None:
                 db.update_batch_item(conn, batch_id, url, "done", video_id=video_id)
                 print(f"  Done: {video_id}")
             except Exception as e:
+                errors += 1
                 db.update_batch_item(conn, batch_id, url, "error", error=str(e))
                 print(f"  Error: {e}")
 
         if not interrupted[0]:
             db.mark_batch_completed(conn, batch_id)
-            print(f"\nBatch {batch_id} completed.")
+            # "completed" on its own reads as "worked". A batch where every
+            # item raised printed exactly that line and exited 0 -- which is
+            # how two clips sat undescribed while the run looked clean. Same
+            # distinction the MCP surface already draws with
+            # `completed_with_failures`; the CLI should not disagree with it.
+            if errors:
+                print(f"\nBatch {batch_id} completed with {errors}/{total} failed.")
+            else:
+                print(f"\nBatch {batch_id} completed.")
     finally:
         signal.signal(signal.SIGINT, original_handler)
         conn.close()
+
+    # Deliberately not counting the interrupt: a Ctrl-C also leaves work undone,
+    # but that is the operator's own doing and it already says so on screen.
+    # Folding it in here would change what an exit code means for a case nobody
+    # complained about, so it stays a separate decision.
+    return errors
+
+
+def fallback_blocked_because(backend, fallback_model, primary_model,
+                             base_url, model_available) -> str:
+    """Why the vision fallback will not run, or "" when it will.
+
+    Four separate things can block it, and the message used to name only the
+    last one: whatever the reason, the log said
+    `fallback 'qwen3-vl:8b' unavailable`. On a run whose backend was simply not
+    ollama that sentence is false -- the model is installed and answering, two
+    lines away in `ollama list` -- and the person reading it goes and installs
+    what is already there. One message for four causes is no message.
+
+    Order matters: the availability probe is a network call, so it stays last
+    and is skipped whenever a cheaper reason already settles the question.
+    """
+    if backend != "ollama":
+        return ("the fallback only runs on the ollama backend, and this run "
+                "used '%s'" % backend)
+    if not fallback_model:
+        return "no VLM_FALLBACK_MODEL is configured"
+    if fallback_model == primary_model:
+        return "fallback '%s' is the model that just failed" % fallback_model
+    if not model_available(base_url, fallback_model):
+        return "fallback '%s' is not installed at %s" % (fallback_model, base_url)
+    return ""
 
 
 def _wants_new_sampling(conn, video_id: str, options: "PipelineOptions") -> bool:
@@ -438,11 +481,11 @@ def _process_single(
             if failed:
                 fb = config.VLM_FALLBACK_MODEL
                 from ..vision.ollama import model_available, OllamaVLM
-                use_fb = (
-                    backend == "ollama" and fb and fb != primary_model
-                    and model_available(config.OLLAMA_BASE_URL, fb)
+                why = fallback_blocked_because(
+                    backend, fb, primary_model,
+                    config.OLLAMA_BASE_URL, model_available,
                 )
-                if use_fb:
+                if not why:
                     print(f"  {len(failed)} frame(s) failed; retrying with fallback {fb}...")
                     fb_vlm = OllamaVLM(base_url=config.OLLAMA_BASE_URL, model=fb)
                     for kf_id, path in failed:
@@ -455,8 +498,8 @@ def _process_single(
                             _persist(kf_id, desc, fb)
                 else:
                     print(
-                        f"  {len(failed)} frame(s) failed; fallback "
-                        f"'{fb or '(none)'}' unavailable — left empty for a later vision retry",
+                        f"  {len(failed)} frame(s) failed; {why} — "
+                        f"left empty for a later vision retry",
                         file=sys.stderr,
                     )
 
