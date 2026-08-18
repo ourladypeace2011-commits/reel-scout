@@ -706,8 +706,46 @@ def get_video(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:
 
 
 def get_video_by_url(conn: sqlite3.Connection, url: str) -> Optional[sqlite3.Row]:
+    """Find a clip by URL, matching on the identity the URL carries.
+
+    An exact string match is tried first and is what almost every call hits. It
+    is not enough on its own, because the URL stored at crawl time is whatever
+    the operator pasted, and Instagram's share button appends a tracking
+    parameter: one row in a real library is stored as
+    `.../reel/DbLQuxQNP3l/?igsh=dmw0ZGYxdms2a3h4`. Paste the same reel's clean
+    URL later and an exact match returns nothing -- and "no video found" is
+    indistinguishable from "that clip was never crawled". The same miss happens
+    for `/reels/` (plural, the share form), the account-scoped
+    `instagram.com/<handle>/reel/<code>/`, and a missing trailing slash.
+
+    So on a miss, fall back to the platform's own identity: the crawler that
+    owns the URL extracts its id, and that id plus the platform is what the row
+    is really keyed on (`_video_id`). Resolution is delegated rather than
+    re-derived here -- `crawl` already knows every URL shape each platform
+    accepts, and a second copy of those patterns in db.py would be one more
+    thing to keep in step.
+    """
     cur = conn.execute("SELECT * FROM videos WHERE url = ?", (url,))
-    return cur.fetchone()
+    row = cur.fetchone()
+    if row is not None:
+        return row
+    if not url or "://" not in url:
+        # Not a URL at all -- an id or prefix. Its own resolver handles that,
+        # and running the crawler registry over it would only waste the lookup.
+        return None
+    try:
+        from .crawl import detect_platform, get_crawler
+
+        platform = detect_platform(url)
+        if platform is None:
+            return None
+        platform_id = get_crawler(url).extract_id(url)
+    except (ImportError, ValueError, RuntimeError):
+        # An unparseable URL is a miss, not a crash: this is a lookup.
+        return None
+    return conn.execute(
+        "SELECT * FROM videos WHERE platform = ? AND platform_id = ?",
+        (platform, platform_id)).fetchone()
 
 
 def upsert_video(

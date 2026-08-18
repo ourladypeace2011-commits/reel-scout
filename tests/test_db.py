@@ -498,3 +498,61 @@ def test_a_console_that_cannot_print_the_warning_does_not_cost_the_transcript(
         assert row["text_full"] == _TRAD + _SIMP
     finally:
         conn.close()
+
+
+# --- URL lookup resolves on identity, not on string equality ---
+
+def _seed_url(conn, url, platform="instagram", platform_id="DbLQuxQNP3l"):
+    return db.upsert_video(conn, platform=platform, platform_id=platform_id,
+                           url=url, title="Reel", duration_sec=29.7)
+
+
+@pytest.mark.parametrize("asked", [
+    "https://www.instagram.com/reel/DbLQuxQNP3l/",          # clean, canonical
+    "https://www.instagram.com/reels/DbLQuxQNP3l/",         # plural, share form
+    "https://instagram.com/reel/DbLQuxQNP3l",               # no www, no slash
+    "https://www.instagram.com/adhiraj.anand/reel/DbLQuxQNP3l/",   # account-scoped
+    "https://www.instagram.com/reel/DbLQuxQNP3l/?igsh=OTHER",      # different tracker
+])
+def test_a_stored_tracking_parameter_does_not_hide_the_clip(asked):
+    """The row was crawled from a share link, so its stored URL carries `?igsh=`.
+
+    Asking with any other spelling of the same reel used to return nothing, and
+    "no video found" reads exactly like "never crawled" — the caller cannot tell
+    a lookup miss from an empty library.
+    """
+    conn, path = _temp_db()
+    try:
+        vid = _seed_url(conn, "https://www.instagram.com/reel/DbLQuxQNP3l/?igsh=dmw0")
+        row = db.get_video_by_url(conn, asked)
+        assert row is not None and row["id"] == vid
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_a_clip_that_was_never_crawled_is_still_a_miss():
+    """The fallback resolves identity; it must not start inventing matches."""
+    conn, path = _temp_db()
+    try:
+        _seed_url(conn, "https://www.instagram.com/reel/DbLQuxQNP3l/")
+        assert db.get_video_by_url(
+            conn, "https://www.instagram.com/reel/NEVERSEEN1/") is None
+        # A different platform with a colliding id is a different clip.
+        assert db.get_video_by_url(
+            conn, "https://www.tiktok.com/@x/video/DbLQuxQNP3l") is None
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_a_non_url_reference_is_not_run_through_the_crawler_registry():
+    """Ids and prefixes reach here too; they have their own resolver."""
+    conn, path = _temp_db()
+    try:
+        vid = _seed_url(conn, "https://www.instagram.com/reel/DbLQuxQNP3l/")
+        assert db.get_video_by_url(conn, vid[:8]) is None
+        assert db.get_video_by_url(conn, "") is None
+    finally:
+        conn.close()
+        os.unlink(path)
