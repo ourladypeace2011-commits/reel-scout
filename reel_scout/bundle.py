@@ -55,17 +55,34 @@ def _page_text(view: Dict[str, Any]) -> str:
         bits.append(kf.get("text_in_frame") or "")
     for key in ("content_type", "content_structure"):
         bits.append(str(view.get(key) or ""))
+    # Read from the view AFTER build_reel_page has applied the --with-marks
+    # gate, so a withheld mark contributes no glyphs -- and a mark that does
+    # ship is not rendered in tofu because the subset was built without it.
+    for mark in view.get("marks") or []:
+        bits.append(mark.get("label") or "")
+        bits.append(mark.get("note") or "")
     return "\n".join(bits)
 
 
 def build_reel_page(conn: db.sqlite3.Connection, video_id: str,
                     cjk_ttf: str = "",
                     max_bytes: int = MAX_EMBED_BYTES,
-                    back_href: Optional[str] = None) -> Dict[str, Any]:
-    """Render one frozen reel page. Returns {ok, html, reason, bytes}."""
+                    back_href: Optional[str] = None,
+                    with_marks: bool = False) -> Dict[str, Any]:
+    """Render one frozen reel page. Returns {ok, html, reason, bytes}.
+
+    `with_marks` defaults to False for the same reason notes and stars are not
+    in here at all: a mark is working state — where someone decided the meaning
+    turns, written while studying the clip — and a take-home file is something
+    a reader receives. The default is the whole safety property, so it is a
+    parameter with one obvious value rather than a caller-by-caller decision,
+    and a test pins it.
+    """
     view = build_inspect_view(conn, video_id)
     if view is None:
         return {"ok": False, "reason": "no such video", "html": "", "bytes": 0}
+    if not with_marks:
+        view["marks"] = []
 
     path = resolve_video_file(view.get("file_path"))
     video_src = None
@@ -124,7 +141,8 @@ p.note{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
 def build_bundle(conn: db.sqlite3.Connection, out_dir: str,
                  video_ids: Optional[List[str]] = None,
                  cjk_ttf: str = "",
-                 max_bytes: int = MAX_EMBED_BYTES) -> Dict[str, Any]:
+                 max_bytes: int = MAX_EMBED_BYTES,
+                 with_marks: bool = False) -> Dict[str, Any]:
     """Write one self-contained page per reel plus an index. Returns a summary
     with what was written and what was skipped (and why)."""
     if video_ids is None:
@@ -140,7 +158,7 @@ def build_bundle(conn: db.sqlite3.Connection, out_dir: str,
         # (If a single page is later moved away on its own the link dangles —
         # the folder is the intended unit; the page itself still works.)
         result = build_reel_page(conn, vid, cjk_ttf=cjk_ttf, max_bytes=max_bytes,
-                                 back_href="index.html")
+                                 back_href="index.html", with_marks=with_marks)
         view = build_inspect_view(conn, vid)
         title = (view or {}).get("title") or vid
         if not result["ok"]:

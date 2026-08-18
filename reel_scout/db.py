@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -142,6 +142,21 @@ CREATE TABLE IF NOT EXISTS video_annotations (
     starred         INTEGER NOT NULL DEFAULT 0,
     updated_at      TEXT DEFAULT (datetime('now'))
 );
+
+-- A mark is a point on one clip's timeline: "the cut at 0:07 is a semantic
+-- turn". It hangs off a second, not off a keyframe row, because keyframes have
+-- a run identity and get superseded (v12) while the second stays the second.
+CREATE TABLE IF NOT EXISTS clip_marks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id        TEXT NOT NULL REFERENCES videos(id),
+    t_sec           REAL NOT NULL,
+    label           TEXT NOT NULL,
+    note            TEXT,
+    source          TEXT DEFAULT 'manual',
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_clip_marks_video ON clip_marks(video_id, t_sec);
 
 CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status);
 CREATE INDEX IF NOT EXISTS idx_videos_platform ON videos(platform);
@@ -503,6 +518,52 @@ def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Clips gain marks — points on the timeline someone put there (v12 -> v13).
+
+    The decoded layers all answer "what is in this clip". None of them answer
+    "which second is the one worth showing", and that answer is the working
+    output of watching a reel with an intent: the cut at 0:07 is a semantic
+    turn, the hook lands at 0:02, the caption everyone copies is at 0:11.
+
+    It is not a note. `annotate.MAX_NOTE_LEN` caps a note at 500 characters and
+    rejects rather than truncates, on purpose -- a note is one line describing a
+    whole clip, and a timeline is a list of somewheres. Nor is it a keyframe
+    row: a keyframe belongs to an extraction run and a later run supersedes it
+    (see the v12 migration), so a mark hung off a keyframe id would stop
+    pointing at anything the first time `--keyframe-strategy` was changed. A
+    mark hangs off `t_sec`, which survives re-extraction because seven seconds
+    into a clip is still seven seconds into that clip.
+
+    `source` is what makes an importer safe to re-run. Rows written by
+    `mark --import <file> --source teardown` carry `import:teardown`, and a
+    re-import deletes only rows with that same source before writing the new
+    ones. Marks someone typed by hand stay `manual` and are never in the blast
+    radius, which is what lets the imported set be a regenerable projection of
+    a file kept somewhere else without the two fighting over the same table.
+
+    Nothing is backfilled: there is no earlier shape of this data to carry
+    forward. The table starts empty and the index is the one the reads need --
+    every query is "this video's marks, in time order".
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS clip_marks (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT NOT NULL REFERENCES videos(id),
+            t_sec           REAL NOT NULL,
+            label           TEXT NOT NULL,
+            note            TEXT,
+            source          TEXT DEFAULT 'manual',
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_clip_marks_video ON clip_marks(video_id, t_sec);
+        """
+    )
+    conn.execute("UPDATE schema_version SET version = 13 WHERE version = 12")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         # `REEL_SCOUT_DATA` defaults to "./data", i.e. relative to wherever the
@@ -567,6 +628,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 11
         if current_ver < 12:
             _migrate_v11_to_v12(conn)
+            current_ver = 12
+        if current_ver < 13:
+            _migrate_v12_to_v13(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -1423,6 +1487,59 @@ def set_annotation(conn: sqlite3.Connection, video_id: str,
     conn.commit()
     row = get_annotation(conn, video_id)
     return dict(row) if row else {}
+
+
+# --- Clip marks (see the v13 migration) ---
+
+def add_clip_mark(conn: sqlite3.Connection, video_id: str, t_sec: float,
+                  label: str, note: Optional[str] = None,
+                  source: str = "manual") -> Dict[str, Any]:
+    cur = conn.execute(
+        "INSERT INTO clip_marks (video_id, t_sec, label, note, source) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (video_id, float(t_sec), label, note, source))
+    conn.commit()
+    row = conn.execute("SELECT * FROM clip_marks WHERE id = ?",
+                       (cur.lastrowid,)).fetchone()
+    return dict(row) if row else {}
+
+
+def list_clip_marks(conn: sqlite3.Connection, video_id: str,
+                    source: Optional[str] = None) -> List[sqlite3.Row]:
+    """One clip's marks in time order — the order every reader wants them in.
+
+    `id` breaks ties so two marks on the same second do not swap places between
+    calls; a list that reorders itself looks like the data changed.
+    """
+    sql = "SELECT * FROM clip_marks WHERE video_id = ?"
+    params: List[Any] = [video_id]
+    if source is not None:
+        sql += " AND source = ?"
+        params.append(source)
+    return conn.execute(sql + " ORDER BY t_sec, id", params).fetchall()
+
+
+def delete_clip_mark(conn: sqlite3.Connection, mark_id: int) -> bool:
+    cur = conn.execute("DELETE FROM clip_marks WHERE id = ?", (int(mark_id),))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_clip_marks(conn: sqlite3.Connection, video_id: str,
+                      source: Optional[str] = None) -> int:
+    """Delete a clip's marks, optionally only those from one source.
+
+    `source=None` means every mark on the clip. Callers that mean "just the ones
+    I wrote" must say so — see `marks.import_marks`, where getting this wrong
+    would let a re-import take someone's hand-typed marks with it.
+    """
+    if source is None:
+        cur = conn.execute("DELETE FROM clip_marks WHERE video_id = ?", (video_id,))
+    else:
+        cur = conn.execute("DELETE FROM clip_marks WHERE video_id = ? AND source = ?",
+                           (video_id, source))
+    conn.commit()
+    return cur.rowcount
 
 
 def normalize_media_paths(
