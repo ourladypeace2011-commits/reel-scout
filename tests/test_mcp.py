@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "research",
     "annotate",
     "list_annotations",
+    "mark",
 }
 
 

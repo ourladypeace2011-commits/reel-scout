@@ -438,6 +438,55 @@ def list_tools() -> List[Dict[str, Any]]:
             },
         },
         {
+            "name": "mark",
+            "description": (
+                "Marks on one clip's timeline — the seconds worth pointing at "
+                "(\"the cut at 0:07 is a semantic turn\"). They render on the "
+                "inspector's waveform and as a clickable list, and re-analyzing "
+                "never touches them. Default action lists; pass t_sec+label to add "
+                "one, marks[] to replace a source's whole set, rm_id to delete one, "
+                "or clear=true to remove them. Timeline marks stay out of exported "
+                "bundles unless the export explicitly asks for them."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "video_id": {"type": "string",
+                                 "description": "URL, video id, or unique id prefix"},
+                    "t_sec": {"type": "number", "description": "Seconds into the clip"},
+                    "label": {"type": "string",
+                              "description": "One line, shown on the timeline"},
+                    "note": {"type": "string",
+                             "description": "Why this second — a sentence, not a document"},
+                    "marks": {
+                        "type": "array",
+                        "description": ("Replace this source's marks with these, all "
+                                        "or nothing. Requires source."),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "t": {"type": "number"},
+                                "label": {"type": "string"},
+                                "note": {"type": "string"},
+                            },
+                            "required": ["t", "label"],
+                        },
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": ("Name the writer. A bare name is stored as "
+                                        "import:<name> and a re-import replaces only "
+                                        "its own rows; 'manual' is reserved for marks "
+                                        "typed by hand and is never touched by one."),
+                    },
+                    "rm_id": {"type": "integer", "description": "Delete this mark id"},
+                    "clear": {"type": "boolean", "default": False,
+                              "description": "Delete this clip's marks (narrow with source)"},
+                },
+                "required": ["video_id"],
+            },
+        },
+        {
             "name": "list_annotations",
             "description": (
                 "Every note / group / star in the library, plus the group list. "
@@ -1526,6 +1575,53 @@ def _tool_annotate(args: Dict[str, Any]) -> Dict[str, Any]:
         conn.close()
 
 
+def _tool_mark(args: Dict[str, Any]) -> Dict[str, Any]:
+    from .. import db, marks as marks_mod
+
+    conn = db.init_db()
+    try:
+        video_id, err = _resolve_video(conn, args.get("video_id") or "")
+        if err is not None:
+            return err
+        try:
+            if args.get("rm_id") is not None:
+                marks_mod.remove(conn, args["rm_id"], video_id=video_id)
+                return _text_result({"video_id": video_id, "removed": args["rm_id"],
+                                     "marks": marks_mod.list_for(conn, video_id)})
+            if args.get("clear"):
+                n = marks_mod.clear(conn, video_id, source=args.get("source"))
+                return _text_result({"video_id": video_id, "removed": n,
+                                     "marks": marks_mod.list_for(conn, video_id)})
+            if args.get("marks") is not None:
+                source = args.get("source")
+                if not source:
+                    # Without a source there is nothing to scope the replacement
+                    # to, and the only reading left ("replace everything") would
+                    # take the hand-typed marks with it.
+                    return _error_result(
+                        "importing marks needs a source name, so a re-import "
+                        "replaces only its own rows")
+                result = marks_mod.import_marks(conn, video_id, args["marks"],
+                                                source=source)
+                result["marks"] = marks_mod.list_for(conn, video_id)
+                return _text_result(result)
+            if args.get("t_sec") is not None or args.get("label"):
+                if args.get("t_sec") is None:
+                    return _error_result("a mark needs t_sec as well as a label")
+                mark = marks_mod.add(conn, video_id, args["t_sec"], args.get("label"),
+                                     note=args.get("note"),
+                                     source=args.get("source") or marks_mod.MANUAL_SOURCE)
+                return _text_result({"video_id": video_id, "mark": mark,
+                                     "marks": marks_mod.list_for(conn, video_id)})
+            return _text_result({"video_id": video_id,
+                                 "marks": marks_mod.list_for(
+                                     conn, video_id, source=args.get("source"))})
+        except marks_mod.MarkError as exc:
+            return _error_result(str(exc))
+    finally:
+        conn.close()
+
+
 def _tool_list_annotations(args: Dict[str, Any]) -> Dict[str, Any]:
     from .. import annotate as ann_mod, db
 
@@ -1551,6 +1647,7 @@ _HANDLERS = {
     "crawl": _tool_crawl,
     "annotate": _tool_annotate,
     "list_annotations": _tool_list_annotations,
+    "mark": _tool_mark,
     "analyze": _tool_analyze,
     "list_videos": _tool_list_videos,
     "show_video": _tool_show_video,

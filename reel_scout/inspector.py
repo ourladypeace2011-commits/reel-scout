@@ -26,7 +26,7 @@ import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import annotate, config, db, i18n, theme
+from . import annotate, config, db, i18n, marks as marks_mod, theme
 from .viewer import build_video_view
 from .utils import paths as media_paths
 
@@ -125,6 +125,11 @@ def build_inspect_view(conn: db.sqlite3.Connection, video_id: str) -> Optional[D
     duration = max(candidates) if candidates else 0.0
 
     file_path = video["file_path"] if video is not None else None
+    # The operator's own timeline. Read here rather than in the renderer so the
+    # frozen export and the live page get it from the same place -- and so the
+    # one caller that must NOT ship them (the take-home bundle) has a single,
+    # visible thing to withhold.
+    view["marks"] = marks_mod.list_for(conn, video_id)
     view["segments"] = segments
     view["language"] = language
     view["duration"] = duration
@@ -344,6 +349,47 @@ def render_inspector(view: Dict[str, Any], base: str = "",
         preview = ('<div class="noplayer" data-i18n="noVideo">video file not on disk &mdash; '
                    'keyframes &amp; transcript only</div>')
 
+    # Marks — the operator's own timeline, in two places that must agree: ticks
+    # on the waveform (where in the clip) and a list under it (what and why).
+    # Both are built from the same rows, so a mark cannot appear in one and not
+    # the other.
+    #
+    # x is in the waveform's own coordinate space (viewBox 0..bins), not pixels
+    # or percent, so the ticks sit in the same system as the bars and the
+    # playhead. drawBars() re-writes the viewBox when the served peak count
+    # differs from _WAVEFORM_BINS, which is why each line also carries data-t
+    # and the script repositions them there rather than trusting this number
+    # forever.
+    mark_rows = list(view.get("marks") or [])
+    wf_marks = ""
+    marks_block = ""
+    if mark_rows:
+        ticks = []
+        for m in mark_rows:
+            t = float(m.get("t_sec") or 0.0)
+            x = (t / dur * _WAVEFORM_BINS) if dur > 0 else 0.0
+            ticks.append(
+                '<line class="mktick" data-t="%.3f" x1="%.3f" y1="0" x2="%.3f" y2="60">'
+                '<title>%s</title></line>'
+                % (t, x, x, _e("%s — %s" % (_fmt_ts(t), m.get("label") or ""))))
+        wf_marks = '<g id="marks">%s</g>' % "".join(ticks)
+
+        rows = []
+        for m in mark_rows:
+            t = float(m.get("t_sec") or 0.0)
+            note = m.get("note") or ""
+            rows.append(
+                '<button class="mkrow" data-ts="%.3f">'
+                '<span class="mkts">%s</span>'
+                '<span class="mklabel">%s</span>'
+                '<span class="mknote">%s</span></button>'
+                % (t, _e(_fmt_ts(t)), _e(m.get("label") or ""), _e(note)))
+        marks_block = ('<section class="block"><div class="eyebrow">%s '
+                       '<span class="q">%d &middot; '
+                       '<span data-i18n="seek">click to seek</span></span></div>'
+                       '<div class="mklist">%s</div></section>'
+                       % (_t("marks", "Marks"), len(rows), "".join(rows)))
+
     # Filmstrip. Each cell carries what was seen in that frame, so the exported
     # page keeps the evidence and not just the thumbnails — a bundle that shows a
     # score with no observations behind it is asking to be taken on faith.
@@ -440,16 +486,18 @@ def render_inspector(view: Dict[str, Any], base: str = "",
         '<span class="q" id="io" data-i18n="noIO">no in/out</span></div>'
         '<div class="wf" id="wf"><svg id="wfsvg" viewBox="0 0 %d 60" preserveAspectRatio="none">'
         '<g id="bars"></g><rect id="sel" class="sel" x="0" y="0" width="0" height="60"></rect>'
+        '%s'
         '<line id="head" class="head" x1="0" y1="0" x2="0" y2="60"></line></svg></div>'
         '<div class="wfbtns"><button id="setin" class="tbtn" data-i18n="setIn">set IN</button>'
         '<button id="setout" class="tbtn" data-i18n="setOut">set OUT</button>'
         '<button id="clrio" class="tbtn" data-i18n="clear">clear</button>'
         '<button id="srt" class="tbtn" data-i18n="exportSrt">export SRT (window)</button>'
         '</div></section>'
-        '%s%s%s%s'
+        '%s%s%s%s%s'
         % (back, langtoggle, _e(vid), _e(view["title"]), meta, _e(view["url"]),
-           summary, preview, _t("waveform", "Waveform"), _WAVEFORM_BINS,
-           filmstrip, transcript, _render_scores(view), _render_structure(view)))
+           summary, preview, _t("waveform", "Waveform"), _WAVEFORM_BINS, wf_marks,
+           marks_block, filmstrip, transcript,
+           _render_scores(view), _render_structure(view)))
 
     return (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
@@ -748,7 +796,22 @@ a{color:inherit}
 .wf rect.bar.in{fill:var(--ink)}
 .wf .sel{fill:var(--ink);opacity:.08}
 .wf .head{stroke:var(--ink);stroke-width:1.5}
+.wf .mktick{stroke:var(--ink);stroke-width:1;stroke-dasharray:2 2;opacity:.55}
+.wf .mktick:hover{opacity:1}
 .wfbtns{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+/* marks — the operator's timeline. Same row grammar as the transcript, so the
+   two lists under the player read as one page rather than two components. */
+.mklist{border:1px solid var(--rule-soft)}
+.mkrow{display:flex;gap:10px;align-items:baseline;width:100%;text-align:left;
+  padding:7px 10px;border:0;border-bottom:1px solid var(--rule-soft);background:none;
+  color:inherit;font:inherit;cursor:pointer}
+.mkrow:last-child{border-bottom:0}
+.mkrow:hover{background:var(--surface)}
+.mkrow.active{background:var(--surface);box-shadow:inset 2px 0 0 var(--ink)}
+.mkts{flex:0 0 2.8rem;color:var(--quiet);font-family:var(--mono);font-size:11px}
+.mklabel{flex:0 0 auto;color:var(--ink)}
+.mknote{flex:1 1 auto;min-width:0;color:var(--quiet);font-size:12px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tbtn{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.12em;
   color:var(--ink-2);background:var(--surface);border:1px solid var(--rule-soft);
   padding:6px 10px;cursor:pointer}
@@ -813,6 +876,8 @@ _SCRIPT = r"""
   var bars=document.getElementById('bars'), sel=document.getElementById('sel'), head=document.getElementById('head');
   var segEls=[].slice.call(document.querySelectorAll('.seg'));
   var cells=[].slice.call(document.querySelectorAll('.cell'));
+  var mkRows=[].slice.call(document.querySelectorAll('.mkrow'));
+  var mkTicks=[].slice.call(document.querySelectorAll('.mktick'));
   var ioLabel=document.getElementById('io');
   var inSec=null, outSec=null;
   var BINS=boot.bins||200;
@@ -855,7 +920,21 @@ _SCRIPT = r"""
       frag+='<rect class="bar" x="'+(i+0.1)+'" y="'+y.toFixed(2)+'" width="0.8" height="'+h.toFixed(2)+'"></rect>';
     }
     bars.innerHTML=frag;
+    paintMarks();
     paintWindow();
+  }
+
+  /* The server renders each tick at t/dur*BINS, but drawBars() re-writes the
+     viewBox to however many peaks actually came back. Re-solving x against the
+     live viewBox is what keeps the tick over the same bar it was drawn for
+     instead of drifting whenever the two counts disagree. */
+  function paintMarks(){
+    if(!mkTicks.length||!svg) return;
+    var n=svg.viewBox.baseVal.width||1;
+    mkTicks.forEach(function(l){
+      var x=(dur>0)?((+l.dataset.t)/dur*n):0;
+      l.setAttribute('x1',x); l.setAttribute('x2',x);
+    });
   }
 
   if(boot.peaks){            // frozen export: peaks travel inside the file
@@ -889,7 +968,9 @@ _SCRIPT = r"""
 
   // --- player as source of truth ---
   if(player){
-    player.addEventListener('loadedmetadata',function(){ if(player.duration&&isFinite(player.duration)) dur=player.duration; });
+    player.addEventListener('loadedmetadata',function(){
+      if(player.duration&&isFinite(player.duration)){ dur=player.duration; paintMarks(); }
+    });
     player.addEventListener('timeupdate',function(){ paintHead(); syncActive(); });
   }
   function syncActive(){
@@ -902,10 +983,17 @@ _SCRIPT = r"""
     cells.forEach(function(c,i){c.classList.toggle('active', i===bestIdx);});
     var kd=document.getElementById('kfdesc');
     if(kd&&bestIdx>=0){ kd.textContent=cells[bestIdx].dataset.desc||''; }
+    /* A mark is a point, not a span, so "current" is the last one passed --
+       highlighting only an exact second would mean the row lights up for one
+       frame and then nothing is current for the rest of the clip. */
+    var mkBest=-1;
+    mkRows.forEach(function(r,i){ if(t+0.001>=(+r.dataset.ts)) mkBest=i; });
+    mkRows.forEach(function(r,i){ r.classList.toggle('active', i===mkBest); });
   }
 
   segEls.forEach(function(s){ s.addEventListener('click',function(){ seek(+s.dataset.start); }); });
   cells.forEach(function(c){ c.addEventListener('click',function(){ seek(+c.dataset.ts); }); });
+  mkRows.forEach(function(r){ r.addEventListener('click',function(){ seek(+r.dataset.ts); }); });
 
   // --- IN / OUT ---
   function setIn(){ inSec=cur(); if(outSec!=null&&inSec>outSec) outSec=null; paintWindow(); }

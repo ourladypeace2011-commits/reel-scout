@@ -118,6 +118,28 @@ def main(argv: List[str] = None) -> None:
         "rm", help="Delete a group (notes and stars are kept, only the filing is cleared)")
     p_group_rm.add_argument("group", help="Group id or name")
 
+    p_mark = sub.add_parser(
+        "mark", help="Mark a moment on a clip's timeline: --at <sec> --label <text>")
+    p_mark.add_argument("video", help="URL, video id, or unique id prefix")
+    p_mark.add_argument("--at", type=float, metavar="SEC",
+                        help="Seconds into the clip")
+    p_mark.add_argument("--label", help="One line, shown on the timeline")
+    p_mark.add_argument("--note", help="Why this second (a sentence, not a document)")
+    p_mark.add_argument("--list", dest="mark_list", action="store_true",
+                        help="List this clip's marks (also what happens with no "
+                             "other action)")
+    p_mark.add_argument("--rm", dest="mark_rm", type=int, metavar="ID",
+                        help="Delete one mark by id")
+    p_mark.add_argument("--import", dest="mark_import", metavar="FILE",
+                        help='Replace this --source\'s marks from a JSON file '
+                             '({"marks":[{"t":7.0,"label":"..."}]}); \'-\' reads stdin')
+    p_mark.add_argument("--clear", dest="mark_clear", action="store_true",
+                        help="Delete this clip's marks (narrow it with --source)")
+    p_mark.add_argument("--source", default=None,
+                        help="Name the writer, so a re-import replaces only its own "
+                             "rows and never the hand-typed ones")
+    p_mark.add_argument("--json", action="store_true", help="Print as JSON")
+
     # --- view ---
     p_view = sub.add_parser(
         "view", help="Serve the local library viewer (analysis read-only; notes save)")
@@ -146,6 +168,10 @@ def main(argv: List[str] = None) -> None:
     p_export.add_argument("--cjk-font", dest="cjk_font", default="",
                           help="bundle: Noto Sans TC .ttf to subset for Chinese "
                                "(else falls back to the reader's system face)")
+    p_export.add_argument("--with-marks", dest="with_marks", action="store_true",
+                          help="Include timeline marks in the exported bundle. "
+                               "Off by default: marks are working state, not "
+                               "something a reader should receive.")
     p_export.add_argument("--max-mb", dest="max_mb", type=float, default=25.0,
                           help="bundle: skip reels whose video exceeds this (default 25)")
 
@@ -344,6 +370,7 @@ def main(argv: List[str] = None) -> None:
         "track": _cmd_track,
         "note": _cmd_note,
         "group": _cmd_group,
+        "mark": _cmd_mark,
         "research": _cmd_research,
         "db": _cmd_db,
         "config": _cmd_config,
@@ -758,7 +785,8 @@ def _cmd_export(args) -> None:
             ids = [vid]
         summary = build_bundle(conn, args.output, video_ids=ids,
                                cjk_ttf=args.cjk_font,
-                               max_bytes=int(args.max_mb * 1048576))
+                               max_bytes=int(args.max_mb * 1048576),
+                               with_marks=args.with_marks)
         for e in summary["written"]:
             print("  %-42s %6.1f MB" % (e["file"], e["bytes"] / 1048576.0))
         for e in summary["skipped"]:
@@ -1238,6 +1266,98 @@ def _cmd_group(args) -> None:
             return
     except ann_mod.AnnotateError as exc:
         raise SystemExit("error: %s" % exc)
+    finally:
+        conn.close()
+
+
+def _fmt_mark(m: Dict[str, Any]) -> str:
+    src = m.get("source") or "manual"
+    tail = "  %s" % m["note"] if m.get("note") else ""
+    return "%5d  %7.2fs  %-28s [%s]%s" % (
+        m["id"], m["t_sec"], m["label"], src, tail)
+
+
+def _cmd_mark(args) -> Optional[int]:
+    """Marks on one clip's timeline. Returns 1 when the command did not land.
+
+    The exit code is the whole point of the return: `mark` is meant to be driven
+    from a generator (`--import` on a file another tool writes), and a writer
+    that exits 0 having written nothing is how a broken pipeline stays invisible
+    for a week. Every path below that prints an error returns non-zero -- the
+    same hole that `batch` and `analyze` had to be fixed for in #68.
+    """
+    from . import db, marks as marks_mod
+
+    config.ensure_dirs()
+    conn = db.init_db()
+    try:
+        video_id = marks_mod.resolve(conn, args.video)
+
+        if args.mark_rm is not None:
+            marks_mod.remove(conn, args.mark_rm, video_id=video_id)
+            print("removed mark %d" % args.mark_rm)
+            return None
+
+        if args.mark_clear:
+            n = marks_mod.clear(conn, video_id, source=args.source)
+            scope = ("source %r" % marks_mod.source_name(args.source)) \
+                if args.source else "all sources"
+            print("removed %d mark(s) from %s (%s)" % (n, video_id, scope))
+            return None
+
+        if args.mark_import:
+            raw = (sys.stdin.read() if args.mark_import == "-"
+                   else open(args.mark_import, encoding="utf-8").read())
+            try:
+                payload = json.loads(raw)
+            except ValueError as exc:
+                print("error: %s is not valid JSON: %s" % (args.mark_import, exc))
+                return 1
+            source = args.source or "import"
+            result = marks_mod.import_marks(conn, video_id, payload, source=source)
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print("%s  %s: removed %d, added %d"
+                      % (video_id, result["source"], result["removed"], result["added"]))
+                if not result["duration_checked"]:
+                    # Not a warning about this import -- a statement about what
+                    # could not be checked, so nobody reads "added 12" as "12
+                    # times verified to be inside the clip".
+                    print("  (clip has no recorded duration — "
+                          "times were not checked against its end)")
+            return None
+
+        if args.at is not None:
+            m = marks_mod.add(conn, video_id, args.at, args.label,
+                              note=args.note,
+                              source=args.source or "manual")
+            if args.json:
+                print(json.dumps(m, ensure_ascii=False, indent=2))
+            else:
+                print("%s  %s" % (video_id, _fmt_mark(m)))
+            return None
+
+        if args.label and args.at is None:
+            print("error: --label needs --at <seconds>")
+            return 1
+
+        rows = marks_mod.list_for(conn, video_id, source=args.source)
+        if args.json:
+            print(json.dumps({"video_id": video_id, "marks": rows},
+                             ensure_ascii=False, indent=2))
+        elif not rows:
+            print("no marks on %s yet — reel-scout mark %s --at 7.0 --label \"...\""
+                  % (video_id, video_id))
+        else:
+            for m in rows:
+                print(_fmt_mark(m))
+        return None
+    except marks_mod.MarkError as exc:
+        raise SystemExit("error: %s" % exc)
+    except OSError as exc:
+        print("error: %s" % exc)
+        return 1
     finally:
         conn.close()
 
