@@ -7,9 +7,17 @@ progress first and the cause last, so the head was reliably the useless part.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
+from pathlib import Path
+from unittest import mock
 
+from reel_scout.utils import stderr as stderr_mod
 from reel_scout.utils.stderr import tail_stderr, warn
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _AsciiOnlyConsole:
@@ -124,3 +132,107 @@ def test_the_mcp_server_fixes_its_console_before_serving():
     src = inspect.getsource(server.main)
     assert "force_utf8_stdio()" in src, (
         "the MCP entry point must fix its console like the CLI one does")
+
+
+# --- the direction that was still unprotected: what comes IN -------------------
+
+
+def test_force_utf8_stdio_reconfigures_stdin_too():
+    """The name says stdio; only the "o" was ever done.
+
+    Everything reaching this package as text on stdin is UTF-8 — the MCP
+    transport, `ingest --from-json -`, `mark --import -`, `crawl --file -`.
+    Python decodes stdin with the locale codepage regardless, so on cp950/cp1252
+    every CJK label arrived as surrogates.
+    """
+    class FakeStream:
+        def __init__(self):
+            self.calls = []
+
+        def reconfigure(self, **kw):
+            self.calls.append(kw)
+
+    stdin, stdout, stderr = FakeStream(), FakeStream(), FakeStream()
+    with mock.patch.object(sys, "stdin", stdin), \
+            mock.patch.object(sys, "stdout", stdout), \
+            mock.patch.object(sys, "stderr", stderr):
+        stderr_mod.force_utf8_stdio()
+
+    assert stdin.calls, "stdin was never reconfigured"
+    assert stdin.calls[0]["encoding"] == "utf-8"
+    # Strict on the way in: a replacement character here is corrupt DATA, and
+    # silently storing 中文 as `???` is worse than refusing the input. The
+    # streams going out keep errors="replace" for the opposite reason — losing a
+    # glyph beats losing the row.
+    assert stdin.calls[0].get("errors") in (None, "strict"), (
+        "stdin must not silently replace undecodable bytes")
+    assert stdout.calls[0]["errors"] == "replace"
+
+
+def test_a_stdin_that_cannot_be_reconfigured_is_not_fatal():
+    """pytest's capture, a pipe wrapper, a detached stream — printing is not
+    this function's job to fix, and neither is reading."""
+    class NoReconfigure:
+        pass
+
+    class Raises:
+        def reconfigure(self, **kw):
+            raise ValueError("detached")
+
+    for fake in (NoReconfigure(), Raises()):
+        with mock.patch.object(sys, "stdin", fake):
+            stderr_mod.force_utf8_stdio()          # must not raise
+
+
+def test_cjk_on_stdin_survives_a_non_utf8_locale(tmp_path):
+    """End-to-end, in a child process whose locale cannot decode what we send.
+
+    This is the shape the bug actually had: `mark --import -` fed UTF-8 JSON with
+    a Chinese label, read back through cp1252/ASCII, stored as surrogates, and
+    blown up at the sqlite write with a message about encoding rather than about
+    the pipe. The label must come back out identical.
+    """
+    data = tmp_path / "lib"
+    data.mkdir()
+    env = dict(os.environ, REEL_SCOUT_DATA=str(data), PYTHONPATH=str(REPO_ROOT),
+               LC_ALL="C", LANG="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+    env.pop("PYTHONIOENCODING", None)              # no rescue from outside
+
+    seed = subprocess.run(
+        [sys.executable, "-c",
+         "from reel_scout import db\n"
+         "c = db.init_db()\n"
+         "v = db.upsert_video(c, platform='instagram', platform_id='CJK00001',\n"
+         "                    url='https://www.instagram.com/reel/CJK00001/',\n"
+         "                    title='t', duration_sec=30.0)\n"
+         "db.update_video_status(c, v, 'analyzed'); c.commit(); print(v)\n"],
+        capture_output=True, text=True, encoding="utf-8", env=env)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    vid = seed.stdout.strip().splitlines()[-1]
+
+    payload = '{"marks":[{"t":1.0,"label":"語意轉場","note":"人眼特寫"}]}'
+    imported = subprocess.run(
+        [sys.executable, "-m", "reel_scout.cli", "mark", vid,
+         "--import", "-", "--source", "cjk"],
+        input=payload.encode("utf-8"), capture_output=True, env=env)
+    out = imported.stdout.decode("utf-8", "replace") + \
+        imported.stderr.decode("utf-8", "replace")
+    assert imported.returncode == 0, out
+    assert "UnicodeEncodeError" not in out and "surrogates" not in out
+
+    # Read back through pure-ASCII JSON. Printing 中文 from a `-c` snippet under
+    # this locale would raise in the READER — and a reader that dies looks exactly
+    # like a row that was never written. The check has to survive the environment
+    # it is checking. (Same trap, fourth time this batch: the tool, the harness
+    # running it, and now the probe reading the result each need saying.)
+    read_back = subprocess.run(
+        [sys.executable, "-c",
+         "import json, sys\n"
+         "from reel_scout import db, marks\n"
+         "c = db.init_db()\n"
+         "rows = [(m['label'], m['note']) for m in marks.list_for(c, %r)]\n"
+         "sys.stdout.write(json.dumps(rows, ensure_ascii=True))\n" % vid],
+        capture_output=True, text=True, env=env)
+    assert read_back.returncode == 0, read_back.stdout + read_back.stderr
+    stored = json.loads(read_back.stdout)
+    assert stored == [["語意轉場", "人眼特寫"]], stored
