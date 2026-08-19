@@ -179,7 +179,16 @@ def test_a_stdin_that_cannot_be_reconfigured_is_not_fatal():
         def reconfigure(self, **kw):
             raise ValueError("detached")
 
-    for fake in (NoReconfigure(), Raises()):
+    class RaisesOSError:
+        def reconfigure(self, **kw):
+            # io.UnsupportedOperation inherits BOTH ValueError and OSError, and a
+            # pipe whose data has already been read raises exactly that. The two
+            # arms of the except clause are not interchangeable: catching only
+            # ValueError leaves a real OSError to kill the process at startup,
+            # and mutation testing found that arm had no test at all.
+            raise OSError("detached")
+
+    for fake in (NoReconfigure(), Raises(), RaisesOSError()):
         with mock.patch.object(sys, "stdin", fake):
             stderr_mod.force_utf8_stdio()          # must not raise
 
