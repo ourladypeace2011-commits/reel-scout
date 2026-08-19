@@ -13,7 +13,7 @@ from typing import Optional
 
 
 def force_utf8_stdio() -> None:
-    """Print UTF-8 regardless of the console's codepage.
+    """Read and print UTF-8 regardless of the console's codepage.
 
     Python encodes stdout with the locale codepage, which on Windows is cp950
     (zh-TW), cp1252 (US/EU) or cp437 (legacy cmd). None of them can encode the
@@ -35,6 +35,30 @@ def force_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="replace")
         except (ValueError, OSError):
             # Detached or already-closed stream; printing is not our job to fix.
+            pass
+
+    # stdin was missing, and the name of this function was already promising it.
+    # Everything that arrives here as text arrives as UTF-8: the MCP transport is
+    # UTF-8 JSON, `ingest --from-json -` and `mark --import -` are fed by other
+    # tools, and `crawl --file -` is a pipe from `browse --urls-only`. Python
+    # decodes stdin with the locale codepage anyway, so on a cp950/cp1252 console
+    # every CJK label came through as surrogates -- and surrogates do not fail
+    # where they are made. They fail later, at the sqlite write, as
+    # "UnicodeEncodeError: surrogates not allowed", pointing at storage rather
+    # than at the pipe that mis-decoded them.
+    #
+    # `errors` is deliberately NOT "replace" here, and the asymmetry with the
+    # streams above is the point. On the way out, a `?` in place of an emoji is
+    # ugly but the row still lands; losing the row would be worse. On the way in,
+    # a replacement character is corrupt DATA -- silently storing 中文 as `???`
+    # is exactly the "ran fine, wrote the wrong thing" failure this package keeps
+    # having to fix. Strict decoding turns that into a loud error at the point of
+    # entry, naming the byte that was not UTF-8.
+    reconfigure = getattr(sys.stdin, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
             pass
 
 
