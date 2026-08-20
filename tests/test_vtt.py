@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from reel_scout.transcribe import find_subtitle
+from reel_scout.transcribe import find_subtitle, is_translated_track
 from reel_scout.transcribe.vtt import _lang_from_path, _parse_ts, parse_vtt
 
 
@@ -115,3 +115,80 @@ class TestFindSubtitle:
         found = find_subtitle(video)
         assert found is not None
         assert found.endswith(".fr.vtt")
+
+
+class TestTranslatedTrackDetection:
+    """YouTube names auto-translated tracks ``<target>-<source>``.
+
+    `yt-dlp --list-subs` on a Taiwanese video lists the original as a bare
+    ``zh-TW`` with no display name, then ~100 translations of it — ``en-zh-TW``
+    shows as "English from Chinese (Taiwan)". The distinguishing feature is that a
+    translated code carries a *second language* subtag, which a plain locale never
+    does.
+    """
+
+    @pytest.mark.parametrize(
+        "lang",
+        ["zh-TW", "zh-Hant", "zh", "en", "en-US", "pt-BR", "en-orig", "es-419"],
+    )
+    def test_originals_are_not_translations(self, lang: str) -> None:
+        assert not is_translated_track(lang), f"{lang} is an original track"
+
+    @pytest.mark.parametrize(
+        "lang",
+        ["en-zh-TW", "zh-Hant-zh-TW", "zh-Hans-zh-TW", "bho-zh-TW", "ja-en"],
+    )
+    def test_translations_are_detected(self, lang: str) -> None:
+        assert is_translated_track(lang), f"{lang} is a machine translation"
+
+
+class TestFindSubtitleSkipsTranslations:
+    """Regression: a Mandarin video came back transcribed into English.
+
+    The download step asks for ``--sub-langs en.*,zh.*``, which matches the
+    translated ``en-zh-TW`` track, and the old preference order tried ``en``
+    first — so the English machine translation beat the ``zh-TW`` original and
+    nothing in the output said so. The stored transcript for one 壹加壹 video
+    opened "I'm so nervous!" for a sentence nobody spoke in English.
+    """
+
+    def test_original_beats_translation_even_when_translation_is_preferred_lang(
+        self, workdir
+    ) -> None:
+        video = os.path.join(workdir, "yt_abc.mp4")
+        _write(video, "")
+        # Exactly the pair that shipped the bug: preferred language, but only as a
+        # translation, against the video's real language.
+        _write(os.path.join(workdir, "yt_abc.en-zh-TW.vtt"), "WEBVTT\n")
+        _write(os.path.join(workdir, "yt_abc.zh-TW.vtt"), "WEBVTT\n")
+        found = find_subtitle(video)
+        assert found is not None
+        assert found.endswith(".zh-TW.vtt"), (
+            "picked the machine translation over the original track"
+        )
+
+    def test_returns_none_when_only_translations_exist(self, workdir) -> None:
+        """Whisper on the real audio beats somebody else's translation."""
+        video = os.path.join(workdir, "yt_abc.mp4")
+        _write(video, "")
+        _write(os.path.join(workdir, "yt_abc.en-zh-TW.vtt"), "WEBVTT\n")
+        _write(os.path.join(workdir, "yt_abc.ja-zh-TW.vtt"), "WEBVTT\n")
+        assert find_subtitle(video) is None
+
+    def test_says_so_when_it_declines(self, workdir, capsys) -> None:
+        """Silently falling back is how this went unnoticed for 110 videos."""
+        video = os.path.join(workdir, "yt_abc.mp4")
+        _write(video, "")
+        _write(os.path.join(workdir, "yt_abc.en-zh-TW.vtt"), "WEBVTT\n")
+        find_subtitle(video)
+        out = capsys.readouterr().out
+        assert "auto-translated" in out and "en-zh-TW" in out
+
+    def test_en_orig_is_still_usable(self, workdir) -> None:
+        """yt-dlp's own ``-orig`` marker is an original, not a translation."""
+        video = os.path.join(workdir, "yt_abc.mp4")
+        _write(video, "")
+        _write(os.path.join(workdir, "yt_abc.en-orig.vtt"), "WEBVTT\n")
+        found = find_subtitle(video)
+        assert found is not None
+        assert found.endswith(".en-orig.vtt")
