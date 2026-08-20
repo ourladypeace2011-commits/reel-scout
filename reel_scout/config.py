@@ -174,6 +174,31 @@ WHISPER_CHUNK_LENGTH = int(os.getenv("WHISPER_CHUNK_LENGTH", "0"))  # 0 = librar
 # Default on; set WHISPER_GUARD_ENABLED=0 to keep raw Whisper output. Only the
 # faster-whisper backend carries the per-segment probabilities the guard needs.
 WHISPER_GUARD_ENABLED = os.getenv("WHISPER_GUARD_ENABLED", "true").lower() in ("true", "1", "yes")
+# Chinese script. Whisper's Chinese training data is overwhelmingly Simplified, so
+# large-v3 normalizes its output to Simplified no matter which variant the speaker
+# uses -- a Taiwanese creator's clip comes back with a Traditional title (that comes
+# from yt-dlp metadata) and a Simplified transcript. Measured on this corpus: 9 of
+# the stored transcripts, including 唐綺陽 / 貝克書 / 財鯨動向, all Traditional
+# speakers.
+#
+# Seeding the decoder with a Traditional prompt fixes it at the source. A/B on one
+# 70s clip: 22 distinct Simplified characters without the prompt, 0 with it -- and
+# the prompted pass also produced punctuation, which the unprompted one omitted
+# entirely.
+#
+# `traditional` (default) seeds that prompt whenever the audio is Chinese. `off`
+# restores the previous raw behavior -- use it if the corpus is mainland content and
+# Simplified is the faithful rendering. The trade-off is real and this is the knob:
+# forcing Traditional on a Simplified-speaking creator is a presentation choice, not
+# a correction.
+#
+# ⚠️ This is a BIAS, not a guarantee: the prompt steers the decoder, it does not
+# constrain it. `db.scan_script_mix` stays the backstop that reports what got
+# through. It is also scoped to SPEECH only -- on-screen text read by OCR is
+# evidence of what the video actually showed, and converting that would be
+# falsifying it.
+WHISPER_ZH_SCRIPT = os.getenv("WHISPER_ZH_SCRIPT", "traditional")
+WHISPER_ZH_PROMPT = os.getenv("WHISPER_ZH_PROMPT", "以下是一段繁體中文的逐字稿。")
 
 # --- Crawl ---
 IG_COOKIES_FILE = os.getenv("IG_COOKIES_FILE", "")
