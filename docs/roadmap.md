@@ -114,6 +114,7 @@ Phase 5  ████████████████████  ✅ Tool 
 - [x] `reel-scout stats` — 全局統計：tag 分佈（content_type/content_structure/format/pacing/opening/cta/emotion）+ score 聚合（overall & 四維 avg/min/max/n），純讀正規化欄位
 - [x] `reel-scout stats --channel <uploader>` — 頻道維度（key on free-text `uploader` 子字串，無 channel 表故非精確 id）
 - [x] `reel-scout stats --csv <path>` — 匯出 long-format CSV（`metric,dimension,key,value`）；另有 `--json`
+- [x] score 聚合**依 `model_used` 分組**（2026-08-20）— craft 分數依模型而異，agent 打的分與本地模型打的分是兩把尺；混合語料下 pooled 區塊被標記為 pooled（`mixed_score_sources`），另出每個來源各自的區塊。per-video 讀取不變
 
 ---
 

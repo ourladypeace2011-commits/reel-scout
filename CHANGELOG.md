@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **`stats` averaged two rulers into one number.** A craft score is only
+  meaningful against the model that produced it — the same clip scores 7.43
+  under `qwen3-vl:8b` and 5.5 under `qwen2.5vl:7b` — and `ingest` stamps every
+  agent-supplied row `agent:<model>` precisely so the origin survives. `stats`
+  then ignored that column entirely: a library holding agent-scored and
+  locally-scored videos reported a single blended mean, and the blend can land
+  in a gap where no video sits. Six videos scoring 8.5/8.0/8.3 (agent) and
+  5.0/5.5/5.2 (local) reported `overall 6.8 / 5.0-8.5 (n=6)` — more than a full
+  point away from every video in the corpus, with nothing on screen to say two
+  scales were in play. Score aggregates are now grouped by `model_used`
+  (`score_aggregates_by_model`, `score_sources`), and the pooled block is kept
+  but labelled as pooled whenever `mixed_score_sources` is true, in the table,
+  in `--json`, and in `--csv`. Grouping is on the exact model string, the finest
+  grain that is correct — two local VLMs are no more comparable to each other
+  than an agent is to either. Per-video reads and the existing `score,*` CSV
+  rows are byte-for-byte unchanged.
 - **A stored media path stopped meaning anything once you changed directory.**
   `DATA_DIR` defaults to `./data` — relative to whatever cwd the process started
   in — so rows written from the repo root recorded `./data/videos/x.mp4` while
