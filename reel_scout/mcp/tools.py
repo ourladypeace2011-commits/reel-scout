@@ -742,8 +742,8 @@ def _tool_show_video(args: Dict[str, Any]) -> Dict[str, Any]:
             "keyframes": [],
         }
         if score is not None:
-            # model_used is the point: agent-scored and locally-scored rows are
-            # averaged together by `stats`, so a score without its origin is
+            # model_used is the point: `stats` groups its aggregates on it, so a
+            # score without its origin falls into the `(unknown)` bucket and is
             # unattributable. Over MCP this is the only place it surfaces.
             payload["score"] = {
                 "overall": score["overall"],

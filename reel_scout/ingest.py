@@ -21,9 +21,10 @@ Two rules here are load-bearing, not stylistic:
    We apply the identical weights, so an agent-scored video sits on the same
    scale as a locally-scored one on that axis at least.
 
-Caveat worth knowing: `stats` aggregates scores without grouping by
-`model_used`, so a corpus mixing agent-scored and locally-scored videos will
-blend two scales in its averages. Per-video reads are unaffected.
+The provenance stamp is what `stats` groups its score aggregates on, so a corpus
+mixing agent-scored and locally-scored videos reports one block per source
+instead of one blended average. Nothing downstream can recover the split if the
+stamp is missing, which is why `provenance()` refuses an empty model name.
 """
 
 from typing import Any, Dict, List, Optional, Tuple

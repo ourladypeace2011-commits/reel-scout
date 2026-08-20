@@ -18,7 +18,8 @@ def _temp_db():
     return conn, path
 
 
-def _seed_video(conn, platform_id, *, title, duration, full=None, score=None):
+def _seed_video(conn, platform_id, *, title, duration, full=None, score=None,
+                model=None):
     vid = db.upsert_video(
         conn, platform="youtube", platform_id=platform_id,
         url="https://youtube.com/shorts/%s" % platform_id,
@@ -37,8 +38,8 @@ def _seed_video(conn, platform_id, *, title, duration, full=None, score=None):
     if score is not None:
         conn.execute(
             """INSERT INTO scores (video_id, hook_strength, visual_storytelling,
-               pacing, structure, overall) VALUES (?,?,?,?,?,?)""",
-            (vid, *score),
+               pacing, structure, overall, model_used) VALUES (?,?,?,?,?,?,?)""",
+            (vid, *score, model),
         )
         conn.commit()
     return vid
@@ -175,6 +176,51 @@ def test_a_clip_with_no_transcript_row_reads_as_no_words():
         vid = _seed_video(conn, "norow", title="No row", duration=5.0,
                           full={"summary": "s"}, score=(7.0, 7.0, 7.0, 7.0, 7.0))
         assert compare.collect_video(conn, vid)["has_transcript"] is False
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_side_by_side_scores_carry_the_model_that_produced_them():
+    """Two clips scored by different models are not on one scale, and this
+    table is exactly where a reader turns two numbers into "A beats B". The
+    source has to be on screen next to the numbers, not one command away."""
+    conn, path = _temp_db()
+    try:
+        a = _seed_video(conn, "byagent", title="Agent scored", duration=30.0,
+                        full={"summary": "s"}, score=(8.5, 8.5, 8.5, 8.5, 8.5),
+                        model="agent:claude-opus-4-8")
+        b = _seed_video(conn, "bylocal", title="Locally scored", duration=30.0,
+                        full={"summary": "s"}, score=(5.0, 5.0, 5.0, 5.0, 5.0),
+                        model="omlx:qwen3-vl:8b")
+        rows = compare.build_comparison(conn, [a, b])["videos"]
+        assert rows[0]["score_source"] == "agent:claude-opus-4-8"
+        assert rows[1]["score_source"] == "omlx:qwen3-vl:8b"
+
+        table = compare.format_table({"videos": rows, "errors": []})
+        assert "Score source" in table
+        assert "agent:claude-opus-4-8" in table
+        assert "omlx:qwen3-vl:8b" in table
+        # and it sits above the numbers it qualifies, not below them
+        assert table.index("Score source") < table.index("Overall score")
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_a_score_written_before_provenance_reads_as_unknown_not_as_absent():
+    """`model_used` NULL means "scored, origin unrecorded" — an em dash, the
+    same as every other unknown in this table. It must not be confused with
+    having no score at all."""
+    conn, path = _temp_db()
+    try:
+        vid = _seed_video(conn, "legacy", title="Legacy", duration=10.0,
+                          full={"summary": "s"}, score=(6.0, 6.0, 6.0, 6.0, 6.0),
+                          model=None)
+        row = compare.collect_video(conn, vid)
+        assert row["score_source"] is None
+        assert row["overall"] == 6.0          # the score itself is still there
+        assert compare._fmt("score_source", row["score_source"]) == compare._MISSING
     finally:
         conn.close()
         os.unlink(path)

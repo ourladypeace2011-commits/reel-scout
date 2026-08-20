@@ -559,8 +559,8 @@ def test_ingest_never_writes_to_stdout(temp_db, tmp_path, capsys, tool):
 
 def test_show_video_reads_back_the_score_with_its_origin(temp_db, tmp_path):
     """An agent that writes a score over MCP has no other way to confirm it, and
-    model_used is the field that matters: `stats` averages agent-scored and
-    locally-scored rows together, so a score without its origin is
+    model_used is the field that matters: `stats` groups its aggregates on it,
+    so a score without its origin lands in the `(unknown)` bucket and is
     unattributable forever."""
     vid = _seed_frames(temp_db, tmp_path, frames=1)
     tools.call_tool("ingest_score", {
