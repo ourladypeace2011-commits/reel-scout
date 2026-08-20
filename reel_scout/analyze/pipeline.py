@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
-from .. import config, db, ffprobe
+from .. import config, db, ffprobe, validity
 from ..crawl import get_crawler
 from ..transcribe import get_transcriber
 from ..transcribe.base import TranscriptResult
@@ -435,6 +435,21 @@ def _process_single(
             print("  Extraction produced no frames — keeping the previous run",
                   file=sys.stderr)
             frames = [(kf["id"], kf["file_path"]) for kf in existing_kf]
+
+    # The one place the "no frames" half of the invalid predicate means anything.
+    # Extraction has definitively been attempted for this video by now, so zero
+    # frames is a settled outcome rather than a not-yet — the distinction the
+    # same query cannot make when run as an ambient sweep over the whole table.
+    # Stopping here is the point: every stage below (VLM, merge, score) will
+    # happily manufacture a plausible artifact out of an empty visual layer, and
+    # the 0.0 that falls out the end is indistinguishable from a real score.
+    bad = validity.invalid_reason(conn, video_id)
+    if bad:
+        validity.mark_invalid(conn, video_id, bad)
+        print("  INVALID: %s" % bad, file=sys.stderr)
+        print("  Marked status=invalid; stopping before vision/merge/score so no "
+              "fabricated 0.0 row is written. Nothing was deleted.", file=sys.stderr)
+        raise validity.InvalidMediaError(video_id, bad)
 
     if options.skip_vision:
         print("  Skipping VLM descriptions — %d keyframe(s) extracted and waiting "

@@ -21,7 +21,15 @@ from __future__ import annotations
 import csv as _csv
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import db
+from . import db, validity
+
+#: Rows whose media never really processed are dropped from every aggregate
+#: here. They are not low scores — they are non-measurements that happen to be
+#: shaped like measurements, and a 0.0 that means "the run died" averages in
+#: exactly like a 0.0 that means "this video is bad". The count is reported
+#: rather than silently swallowed, because a corpus quietly getting smaller is
+#: the same class of defect this guard exists to stop.
+_NOT_INVALID = validity.exclude_sql("v")
 
 # Normalized enum columns on `analyses` (added in schema v5/v6).
 TAG_COLUMNS = [
@@ -79,7 +87,8 @@ def _score_groups(
             "MAX(s.{c}) AS {c}_max, COUNT(s.{c}) AS {c}_cnt".format(c=col))
     sql = ("SELECT " + ", ".join(selects) +
            " FROM scores s JOIN videos v ON s.video_id = v.id "
-           "WHERE 1=1" + where + " GROUP BY src ORDER BY row_count DESC, src")
+           "WHERE 1=1" + where + _NOT_INVALID +
+           " GROUP BY src ORDER BY row_count DESC, src")
     # The UNKNOWN_MODEL placeholder sits in the SELECT list, which SQLite binds
     # before the WHERE clause's — so it has to lead the parameter list.
     rows = conn.execute(sql, [UNKNOWN_MODEL] + params).fetchall()
@@ -101,11 +110,15 @@ def compute_stats(conn: db.sqlite3.Connection, channel: Optional[str] = None) ->
     where, params = _channel_clause(channel)
 
     total = conn.execute(
-        "SELECT COUNT(*) FROM videos v WHERE 1=1" + where, params
+        "SELECT COUNT(*) FROM videos v WHERE 1=1" + where + _NOT_INVALID, params
     ).fetchone()[0]
     analyzed = conn.execute(
         "SELECT COUNT(*) FROM analyses a JOIN videos v ON a.video_id = v.id "
-        "WHERE 1=1" + where, params
+        "WHERE 1=1" + where + _NOT_INVALID, params
+    ).fetchone()[0]
+    excluded_invalid = conn.execute(
+        "SELECT COUNT(*) FROM videos v WHERE v.status = ?" + where,
+        [validity.INVALID_STATUS] + params
     ).fetchone()[0]
 
     # Tag distributions. Column names come from the hardcoded TAG_COLUMNS list
@@ -115,8 +128,8 @@ def compute_stats(conn: db.sqlite3.Connection, channel: Optional[str] = None) ->
         rows = conn.execute(
             "SELECT a.{c} AS val, COUNT(*) AS cnt FROM analyses a "
             "JOIN videos v ON a.video_id = v.id "
-            "WHERE a.{c} IS NOT NULL{w} GROUP BY a.{c} ORDER BY cnt DESC, val".format(
-                c=col, w=where),
+            "WHERE a.{c} IS NOT NULL{w}{x} GROUP BY a.{c} ORDER BY cnt DESC, val".format(
+                c=col, w=where, x=_NOT_INVALID),
             params,
         ).fetchall()
         tag_distributions[col] = {r["val"]: r["cnt"] for r in rows}
@@ -126,7 +139,7 @@ def compute_stats(conn: db.sqlite3.Connection, channel: Optional[str] = None) ->
         row = conn.execute(
             "SELECT AVG(s.{c}) AS avg, MIN(s.{c}) AS min, MAX(s.{c}) AS max, "
             "COUNT(s.{c}) AS cnt FROM scores s JOIN videos v ON s.video_id = v.id "
-            "WHERE s.{c} IS NOT NULL{w}".format(c=col, w=where),
+            "WHERE s.{c} IS NOT NULL{w}{x}".format(c=col, w=where, x=_NOT_INVALID),
             params,
         ).fetchone()
         score_aggregates[col] = _agg(row["avg"], row["min"], row["max"], row["cnt"])
@@ -137,6 +150,7 @@ def compute_stats(conn: db.sqlite3.Connection, channel: Optional[str] = None) ->
         "channel": channel,
         "total_videos": total,
         "analyzed_videos": analyzed,
+        "excluded_invalid": excluded_invalid,
         "tag_distributions": tag_distributions,
         # Pooled across every source. Safe to read on its own only when
         # `mixed_score_sources` is False.
@@ -166,6 +180,10 @@ def format_stats(stats: Dict[str, Any]) -> str:
     lines.append("=" * 40)
     lines.append("Videos: %d total, %d analyzed" % (
         stats["total_videos"], stats["analyzed_videos"]))
+    if stats.get("excluded_invalid"):
+        lines.append(
+            "Excluded: %d invalid (media never processed; see "
+            "`reel-scout db check-invalid`)" % stats["excluded_invalid"])
 
     lines.append("\n-- Tag distributions --")
     for col, dist in stats["tag_distributions"].items():
@@ -211,6 +229,8 @@ def to_csv_rows(stats: Dict[str, Any]) -> List[List[Any]]:
     rows: List[List[Any]] = [["metric", "dimension", "key", "value"]]
     rows.append(["count", "videos", "total", stats["total_videos"]])
     rows.append(["count", "videos", "analyzed", stats["analyzed_videos"]])
+    rows.append(["count", "videos", "excluded_invalid",
+                 stats.get("excluded_invalid", 0)])
     for col, dist in stats["tag_distributions"].items():
         for key, val in dist.items():
             rows.append(["tag", col, key, val])

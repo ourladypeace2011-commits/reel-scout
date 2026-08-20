@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from . import config, db, ingest
+from . import config, db, ingest, validity
 from .llm import get_llm
 
 _SCORE_PROMPT = """You are a short-form video content analyst. Based on the analysis below, score this video on 4 dimensions (0-10 scale, decimals ok).
@@ -94,6 +94,16 @@ def score_video(
     llm_backend: Optional[str] = None,
 ) -> VideoScore:
     """Score a video using LLM analysis."""
+    # A video already known to be unusable must not acquire a score by a second
+    # route. The pipeline stops before this call, but `score` is also reachable
+    # directly, and the failure mode being prevented is precisely a real-looking
+    # number produced from nothing — see reel_scout/validity.py.
+    if validity.is_invalid(conn, video_id):
+        raise ValueError(
+            "refusing to score %s: it is marked invalid (%s). Scoring it would "
+            "put a fabricated number back into the corpus aggregates."
+            % (video_id, db.get_video(conn, video_id)["error_message"]))
+
     analysis = db.get_analysis(conn, video_id)
     if not analysis:
         raise ValueError("No analysis found for video: %s" % video_id)

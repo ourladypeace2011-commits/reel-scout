@@ -13,7 +13,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from . import db
+from . import db, validity
+
+#: Same exclusion stats.py applies, for the same reason: a video whose media
+#: never processed is a non-measurement, and the high/low split is exactly where
+#: a fake 0.0 does the most damage — it anchors the bottom half of the channel.
+_NOT_INVALID = validity.exclude_sql("v")        # queries that alias videos as v
+_NOT_INVALID_BARE = validity.exclude_sql("")    # queries that select FROM videos
 
 # Distribution columns surfaced per channel (subset of the normalized tags most
 # useful for "how does this channel build videos").
@@ -25,8 +31,8 @@ def _dist(conn, col: str, uploader: str) -> Dict[str, int]:
     rows = conn.execute(
         "SELECT a.{c} AS val, COUNT(*) AS cnt FROM analyses a "
         "JOIN videos v ON a.video_id = v.id "
-        "WHERE a.{c} IS NOT NULL AND v.uploader LIKE ? "
-        "GROUP BY a.{c} ORDER BY cnt DESC, val".format(c=col),
+        "WHERE a.{c} IS NOT NULL AND v.uploader LIKE ?{x} "
+        "GROUP BY a.{c} ORDER BY cnt DESC, val".format(c=col, x=_NOT_INVALID),
         ("%" + uploader + "%",),
     ).fetchall()
     return {r["val"]: r["cnt"] for r in rows}
@@ -67,8 +73,8 @@ def _high_low_split(conn, uploader: str) -> Dict[str, Any]:
         "a.style_pacing AS pacing FROM scores s "
         "JOIN videos v ON s.video_id = v.id "
         "LEFT JOIN analyses a ON a.video_id = s.video_id "
-        "WHERE s.overall IS NOT NULL AND v.uploader LIKE ? "
-        "ORDER BY s.overall".format(),
+        "WHERE s.overall IS NOT NULL AND v.uploader LIKE ?{x} "
+        "ORDER BY s.overall".format(x=_NOT_INVALID),
         ("%" + uploader + "%",),
     ).fetchall()
     if len(rows) < 2:
@@ -98,18 +104,21 @@ def _high_low_split(conn, uploader: str) -> Dict[str, Any]:
 def compute_patterns(conn: db.sqlite3.Connection, channel: str) -> Dict[str, Any]:
     like = "%" + channel + "%"
     total = conn.execute(
-        "SELECT COUNT(*) FROM videos WHERE uploader LIKE ?", (like,)).fetchone()[0]
+        "SELECT COUNT(*) FROM videos WHERE uploader LIKE ?" + _NOT_INVALID_BARE,
+        (like,)).fetchone()[0]
     analyzed = conn.execute(
         "SELECT COUNT(*) FROM analyses a JOIN videos v ON a.video_id = v.id "
-        "WHERE v.uploader LIKE ?", (like,)).fetchone()[0]
+        "WHERE v.uploader LIKE ?" + _NOT_INVALID, (like,)).fetchone()[0]
     dur_row = conn.execute(
         "SELECT AVG(duration_sec) AS avg, COUNT(duration_sec) AS n "
-        "FROM videos WHERE uploader LIKE ? AND duration_sec IS NOT NULL", (like,)
+        "FROM videos WHERE uploader LIKE ? AND duration_sec IS NOT NULL"
+        + _NOT_INVALID_BARE, (like,)
     ).fetchone()
     dates = [
         d for d in (
             _parse_upload_date(r[0]) for r in conn.execute(
-                "SELECT upload_date FROM videos WHERE uploader LIKE ?", (like,)).fetchall()
+                "SELECT upload_date FROM videos WHERE uploader LIKE ?"
+                + _NOT_INVALID_BARE, (like,)).fetchall()
         ) if d is not None
     ]
 

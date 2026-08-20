@@ -29,7 +29,7 @@ see [`../prompts/signal-reliability-cheatsheet.md`](../prompts/signal-reliabilit
 | `batch --stdin` / `--file <path>` / `--doc <url>` | Analyze every reel in a list, one bundle each. `--dry-run`, `--limit`, `--out`, `--mode`. Prefer `--stdin`/`--file` for someone's own list — it stays on their machine. `--doc` rewrites Google `/edit` links to no-auth export endpoints, which needs sharing set to "anyone with the link", i.e. it makes that document public to anyone holding the URL. |
 | `skill {install,path}` | Copy the agent-facing assets (SKILL.md, `/scout`, prompt pack, setup preflight) to `~/.claude/skills/reel-scout`. `--dest`, `--force`. `pip install` alone does **not** give an agent anything to load. |
 | `mcp install` / `mcp path` | Register the MCP server with Claude Desktop / Claude Code so they can launch it, pinning an absolute `REEL_SCOUT_DATA`. `--client`, `--data`, `--path`, `--force`, `--dry-run`. `mcp path` diagnoses what is configured versus what this directory resolves to. |
-| `db {stats,reset,migrate}` / `config {show,check}` | DB / config utilities. |
+| `db {stats,reset,migrate,normalize-paths,backfill-text,check-invalid}` / `config {show,check}` | DB / config utilities. `check-invalid` lists videos whose media never really processed (0 keyframes alongside a non-empty transcript) and would otherwise average into `stats` as a genuine 0.0; it reports by default and marks `status=invalid` only with `--apply`. It never deletes. |
 
 Refs (`<ref>`, `<id>`) accept a full 16-hex video id or a unique prefix; `track --my-video` also accepts a URL already in the DB.
 
