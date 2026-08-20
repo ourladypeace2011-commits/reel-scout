@@ -4,6 +4,31 @@
 
 ### Fixed
 
+- **A video that never processed entered the corpus as a craft score of 0.0, and
+  every aggregate averaged it in.** A 4h11m livestream (`RwyLahUuGcc`) held
+  0.0 on all four dimensions with `status='analyzed'`. It was not a weak video:
+  keyframe extraction had produced **zero** frames, so the merge stage had no
+  visual layer, returned unparseable output, and stored an analysis whose entire
+  body was `{"summary": "{\n", "topics": [], "error": "failed to parse JSON"}`.
+  The scorer then ran on that carcass — its own reasoning field reads
+  "impossible to score the video accurately" — and the pipeline wrote that
+  refusal down as 0.0. Three stages each manufactured a plausible artifact from
+  nothing, and a NULL would have been visibly missing where a 0.0 silently
+  averages. One fake row in 111 was holding down the floor of every dimension in
+  `stats`: min overall read 0.0, when the corpus floor is really 3.05.
+  The pipeline now checks, at the single point where keyframe extraction has
+  definitively been attempted, for `keyframes == 0` alongside a non-empty
+  transcript — speech proves the media decoded, so zero frames is a
+  contradiction rather than a hard-to-sample clip. Such a video is marked
+  `status='invalid'` with the measurements as its reason, and the run stops
+  before vision, merge and score can invent anything. `stats` and `patterns`
+  exclude invalid rows and report the excluded count rather than quietly
+  shrinking. `scorer.score_video` refuses a video already marked invalid, so the
+  number cannot come back by a second route. The all-zero score is deliberately
+  *not* part of the test: a genuinely terrible video still has frames, and
+  marking real work invalid because the score looked bad would be worse than the
+  defect. `reel-scout db check-invalid [--apply]` audits an existing library;
+  it reports by default, marks only when asked, and never deletes.
 - **A stored media path stopped meaning anything once you changed directory.**
   `DATA_DIR` defaults to `./data` — relative to whatever cwd the process started
   in — so rows written from the repo root recorded `./data/videos/x.mp4` while

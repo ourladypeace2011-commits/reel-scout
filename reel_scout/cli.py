@@ -334,6 +334,16 @@ def main(argv: List[str] = None) -> None:
     p_db_backfill.add_argument(
         "--dry-run", action="store_true", help="Report what would be filled; write nothing"
     )
+    p_db_invalid = p_db_sub.add_parser(
+        "check-invalid",
+        help="Find stored videos whose media never processed (0 keyframes but a "
+             "transcript) and would otherwise score as a real 0.0",
+    )
+    p_db_invalid.add_argument(
+        "--apply", action="store_true",
+        help="Mark the listed videos status=invalid. Nothing is ever deleted; "
+             "the media, transcript and any scores stay on disk.",
+    )
 
     # --- config ---
     p_config = sub.add_parser("config", help="Configuration")
@@ -1462,8 +1472,50 @@ def _cmd_db(args) -> None:
             print("  wrote %d caption(s) for %d video(s)"
                   % (r["captions"], r["videos_with_captions"]))
 
+    elif args.db_command == "check-invalid":
+        from . import validity
+
+        config.ensure_dirs()
+        conn = db.init_db()
+        try:
+            hits = validity.scan(conn)
+            if not hits:
+                print("No videos match the invalid shape "
+                      "(0 keyframes with a non-empty transcript).")
+                return
+            print("%d video(s) match the invalid shape "
+                  "(0 keyframes with a non-empty transcript):\n" % len(hits))
+            for h in hits:
+                print("  %s  [%s]" % (h["id"], h["platform_id"]))
+                print("    title:      %s" % (h["title"] or "—"))
+                print("    uploader:   %s" % (h["uploader"] or "—"))
+                print("    duration:   %s s" % (h["duration_sec"]
+                                                if h["duration_sec"] is not None else "—"))
+                print("    keyframes:  %d   transcript: %d chars"
+                      % (h["keyframes"], h["transcript_chars"]))
+                print("    status:     %s   stored overall score: %s"
+                      % (h["status"], h["overall"] if h["overall"] is not None else "—"))
+                print("")
+            if args.apply:
+                marked = 0
+                for h in hits:
+                    if h["status"] != validity.INVALID_STATUS:
+                        validity.mark_invalid(conn, h["id"], h["reason"])
+                        marked += 1
+                print("Marked %d video(s) status=invalid. Nothing was deleted — the "
+                      "media, transcript, keyframe rows and any existing score are "
+                      "untouched, and the mark is reversible." % marked)
+                print("They are now excluded from `stats` and `patterns`.")
+            else:
+                print("Reported only; nothing was written. Re-run with --apply to "
+                      "mark these status=invalid (still no deletion), or leave them "
+                      "as-is if you disagree with the call.")
+        finally:
+            conn.close()
+
     else:
-        print("Use: reel-scout db {stats|reset|migrate|backfill-text}")
+        print("Use: reel-scout db "
+              "{stats|reset|migrate|normalize-paths|backfill-text|check-invalid}")
 
 
 def _probe_cmd(cmd, timeout=5):
