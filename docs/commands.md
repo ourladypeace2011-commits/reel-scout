@@ -82,14 +82,15 @@ reel-scout ingest analysis <id> --from-json - --model <name>   # merge needs an 
 reel-scout ingest score    <id> --from-json - --model <name>
 ```
 
-This is the only path that needs no `oMLX`/`ollama`/API key. Two caveats worth
-stating out loud:
+This is the only path that needs no `oMLX`/`ollama`/API key. The thing to know:
 
 - Rows are stamped `agent:<model>`, because craft scores are **model-dependent**
   (the same clip: 7.43 under `qwen3-vl:8b`, 5.5 under `qwen2.5vl:7b`).
-- `stats` aggregates **without** grouping by `model_used`, so a corpus mixing
-  agent-scored and locally-scored videos blends two scales in its averages.
-  Per-video reads are unaffected.
+- `stats` therefore groups score aggregates **by `model_used`**. A corpus mixing
+  agent-scored and locally-scored videos gets one block per source, and the
+  pooled block is labelled as pooled (`mixed_score_sources: true` in `--json`,
+  `flag,score_source,mixed,1` in `--csv`) so it is not read as a single scale.
+  Per-video reads are unaffected either way.
 
 Transcription still wants a local Whisper; set `WHISPER_MODEL=small` to keep the
 download modest, or rely on subtitle-first when the source has native subtitles.

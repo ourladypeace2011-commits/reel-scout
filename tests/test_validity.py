@@ -258,6 +258,55 @@ def test_stats_drops_the_invalid_row_and_reports_the_exclusion():
         os.unlink(path)
 
 
+def test_per_model_score_groups_also_drop_the_invalid_row():
+    """The pooled block and the per-`model_used` block are two separate queries.
+
+    Excluding the fake row from only one of them is worse than excluding it from
+    neither, because the two blocks would then disagree and neither would say
+    why. (This is exactly what a textual auto-merge produced when the grouping
+    landed alongside this guard — the pooled query carried the exclusion and the
+    grouped one silently did not.)
+    """
+    conn, path = _fresh_db()
+    try:
+        good = _video(conn, "good")
+        _transcript(conn, good); _keyframes(conn, good); _analysis(conn, good)
+        conn.execute(
+            "INSERT INTO scores (video_id, hook_strength, visual_storytelling, "
+            "pacing, structure, overall, model_used) VALUES (?,?,?,?,?,?,?)",
+            (good, 8.0, 8.0, 8.0, 8.0, 8.0, "ollama"))
+
+        bad = _video(conn, "bad", duration=15035.0)
+        _transcript(conn, bad, chars=55521); _analysis(conn, bad)
+        conn.execute(
+            "INSERT INTO scores (video_id, hook_strength, visual_storytelling, "
+            "pacing, structure, overall, model_used) VALUES (?,?,?,?,?,?,?)",
+            (bad, 0.0, 0.0, 0.0, 0.0, 0.0, "ollama"))
+        conn.commit()
+
+        polluted = stats.compute_stats(conn)
+        assert polluted["score_sources"]["ollama"] == 2
+        assert polluted["score_aggregates_by_model"]["ollama"]["overall"]["min"] == 0.0
+
+        validity.mark_invalid(conn, bad, validity.invalid_reason(conn, bad))
+
+        after = stats.compute_stats(conn)
+        # Census and per-model aggregate both drop it...
+        assert after["score_sources"]["ollama"] == 1
+        by_model = after["score_aggregates_by_model"]["ollama"]["overall"]
+        assert by_model["count"] == 1
+        assert by_model["min"] == 8.0
+        assert by_model["avg"] == 8.0
+        # ...and agree with the pooled block, which is the point.
+        pooled = after["score_aggregates"]["overall"]
+        assert pooled["count"] == by_model["count"]
+        assert pooled["avg"] == by_model["avg"]
+        assert after["mixed_score_sources"] is False
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
 def test_stats_channel_scope_counts_only_that_channels_invalid_rows():
     """The scoped exclusion query binds two parameters in order (status, then
     uploader). Swapping them silently returns 0 for every channel, which reads

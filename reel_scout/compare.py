@@ -26,6 +26,11 @@ FIELDS: List[Tuple[str, str]] = [
     # likely to turn two numbers into "A is better than B", and until now it
     # never once looked at whether either clip had words to score.
     ("has_transcript", "Transcript"),
+    # Same reason, second axis: craft scores are model-dependent (the same clip
+    # scores 7.43 under qwen3-vl:8b and 5.5 under qwen2.5vl:7b), so two clips
+    # scored by different models are not on one scale and the "A > B" reading is
+    # unavailable. `stats` groups on this; here it just has to be visible.
+    ("score_source", "Score source"),
     ("hook_strength", "Hook score"),
     ("visual_storytelling", "Visual score"),
     ("pacing_score", "Pacing score"),
@@ -72,6 +77,7 @@ def collect_video(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
             bool((transcript["text_full"] or "").strip())
             if transcript is not None else False
         ),
+        "score_source": None,
         "hook_strength": None,
         "visual_storytelling": None,
         "pacing_score": None,
@@ -90,6 +96,9 @@ def collect_video(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
         row["content_type"] = full.get("content_type")
 
     if score is not None:
+        # An em dash here reads as "scored, origin unrecorded" — which is what a
+        # pre-provenance row actually is, and not the same as having no score.
+        row["score_source"] = score["model_used"] or None
         row["hook_strength"] = score["hook_strength"]
         row["visual_storytelling"] = score["visual_storytelling"]
         row["pacing_score"] = score["pacing"]
