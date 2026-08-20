@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,8 +14,8 @@ from reel_scout.vision.keyframe import (
     _scale_vf,
     _seek_args,
     auto_frame_budget,
+    detect_timeout,
     extract_keyframes,
-    scene_timeout,
     select_spread,
 )
 from reel_scout import config
@@ -334,7 +336,7 @@ class TestMotionStrategy:
         assert "mpdecimate" in vf_arg
 
 
-def test_scene_timeout_scales_with_duration_and_stays_capped():
+def test_detect_timeout_scales_with_duration_and_stays_capped():
     """A fixed 120s made long clips unextractable, and it failed quietly.
 
     Scene detection decodes until it has found enough cuts; `-frames:v` is what
@@ -350,10 +352,10 @@ def test_scene_timeout_scales_with_duration_and_stays_capped():
     cut-less one decodes on. Capping at all is safe only because a timeout is no
     longer fatal.
     """
-    assert scene_timeout(8) == 120           # a reel keeps the old floor
-    assert scene_timeout(1200) == 240        # 20 min earns more
-    assert scene_timeout(15035) == 300       # 4 h is capped, not proportional
-    assert scene_timeout(0) == 120           # unknown duration degrades to the floor
+    assert detect_timeout(8) == 120           # a reel keeps the old floor
+    assert detect_timeout(1200) == 240        # 20 min earns more
+    assert detect_timeout(15035) == 300       # 4 h is capped, not proportional
+    assert detect_timeout(0) == 120           # unknown duration degrades to the floor
 
 
 def test_scene_detect_timeout_falls_back_to_interval_instead_of_zero_frames(
@@ -734,3 +736,240 @@ class TestBudgetIsThinnedNotTruncated:
         assert kept[-1] > 59.0, "the frame at the clip's end must survive"
         assert [f.frame_index for f in sorted(
             frames, key=lambda f: f.timestamp_sec)] == [0, 1, 2, 3]
+
+
+class TestMotionDetectionPass:
+    """`motion` had the defect `scene` was fixed for in #68, plus one of its own.
+
+    Both are pinned at the argv, because a test of the selector alone passes
+    against the broken code: the selector was always fine, it was just handed a
+    list that only ever described the opening of the clip.
+    """
+
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=15.3)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_detection_does_not_stop_at_the_budget(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        res = MagicMock()
+        res.stderr = "\n".join("n:%d pts_time:%.2f" % (i, t)
+                               for i, t in enumerate(CLUSTERED))
+        res.stdout = ""
+        mock_run.return_value = res
+
+        extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                          strategy="motion", max_frames=8)
+
+        detect = mock_run.call_args_list[0][0][0]
+        assert "-frames:v" not in detect, (
+            "mpdecimate emits across the whole file — measured, 405 of a 13.7s "
+            "reel's ~411 frames survive it — so capping the pass made ffmpeg "
+            "quit inside the first second every time")
+        assert detect[detect.index("-f") + 1] == "null", (
+            "unbounded detection must not also write unbounded JPEGs")
+
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=15.3)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_showinfo_reads_source_time_not_a_rebased_ordinal(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        """The second defect, and the reason it hid for so long.
+
+        `setpts=N/FRAME_RATE/TB` sat *before* `showinfo`, so the pts_time being
+        parsed was the surviving frame's ordinal over the frame rate. Measured
+        on a 10s clip built as 5s frozen + 5s moving: the old chain reported
+        0.00–0.27s for frames that actually came from 0.00s and 5.00–5.20s. The
+        images were real; the timestamps written next to them were not.
+        """
+        res = MagicMock()
+        res.stderr = "\n".join("n:%d pts_time:%.2f" % (i, t)
+                               for i, t in enumerate(CLUSTERED))
+        res.stdout = ""
+        mock_run.return_value = res
+
+        extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                          strategy="motion", max_frames=8)
+
+        detect = mock_run.call_args_list[0][0][0]
+        vf = detect[detect.index("-vf") + 1]
+        assert "mpdecimate" in vf
+        assert "setpts" not in vf, (
+            "showinfo runs after the filter chain, so any setpts ahead of it "
+            "replaces the timestamp this function exists to report")
+
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=15.3)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_the_frames_it_grabs_cover_the_clip_not_its_opening(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        res = MagicMock()
+        res.stderr = "\n".join("n:%d pts_time:%.2f" % (i, t)
+                               for i, t in enumerate(CLUSTERED))
+        res.stdout = ""
+        mock_run.return_value = res
+
+        frames = extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                                   strategy="motion", max_frames=8)
+
+        stamps = sorted(f.timestamp_sec for f in frames)
+        assert stamps[-1] - stamps[0] > 15.3 * 0.5, (
+            "the sampled span has to cover more than half the clip; before "
+            "this change it was the first eight survivors")
+        assert stamps[-1] > 13.0
+        assert _max_gap(stamps) < 4.0
+
+    @patch("reel_scout.vision.keyframe._get_duration", return_value=15.3)
+    @patch("reel_scout.vision.keyframe.os.path.exists", return_value=True)
+    @patch("reel_scout.vision.keyframe.os.makedirs")
+    @patch("reel_scout.vision.keyframe.subprocess.run")
+    def test_the_detection_pass_reads_ffmpeg_as_utf8(
+        self, mock_run, mock_makedirs, mock_exists, mock_duration,
+    ):
+        """Companion to the behavioural test below; this one names the kwarg.
+        `text=True` on its own decodes with the console codepage."""
+        res = MagicMock()
+        res.stderr = "n:0 pts_time:0.00"
+        res.stdout = ""
+        mock_run.return_value = res
+
+        extract_keyframes("/tmp/v.mp4", "/tmp/out", "vid1",
+                          strategy="motion", max_frames=8)
+
+        assert mock_run.call_args_list[0][1].get("encoding") == "utf-8"
+
+
+def test_motion_detect_timeout_falls_back_to_interval_instead_of_zero_frames(
+        tmp_path, monkeypatch):
+    """Removing the early exit is what made this reachable.
+
+    While `-frames:v` was there the pass exited within the first second and
+    could not overrun. Unbounded, it can — and an overrun that ended in zero
+    frames would cost the whole visual layer, which is the one outcome worth
+    engineering away.
+    """
+    from reel_scout.vision import keyframe
+
+    def _timeout_on_motion_detect(cmd, **kw):
+        if any("mpdecimate" in str(a) for a in cmd):
+            raise subprocess.TimeoutExpired(cmd, 300)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(keyframe.subprocess, "run", _timeout_on_motion_detect)
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 15035.0)
+    monkeypatch.setattr(
+        keyframe, "_extract_interval",
+        lambda video_path, output_dir, video_id, n, *a, **kw: [
+            KeyframeInfo(frame_index=i, timestamp_sec=float(i * 100),
+                         file_path="%s/f%d.jpg" % (output_dir, i),
+                         strategy="interval")
+            for i in range(n)])
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+
+    frames = keyframe.extract_keyframes(
+        str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+        strategy="motion", max_frames=5)
+
+    assert len(frames) == 5, "a motion-detect timeout must not end with zero frames"
+    assert all(f.strategy == "interval" for f in frames)
+
+
+def test_partial_motion_result_is_not_padded_with_interval(tmp_path, monkeypatch):
+    """Falling back is for nothing at all, not for "fewer than budget".
+
+    `len(frames) < max_frames` would quietly turn `motion` into `hybrid` for
+    every clip with few moving frames, diluting them with arbitrary ones and
+    buying an extra VLM call for each. `hybrid` already exists for that.
+    """
+    from reel_scout.vision import keyframe
+
+    motion_frames = [
+        KeyframeInfo(frame_index=0, timestamp_sec=1.0,
+                     file_path=str(tmp_path / "m0.jpg"), strategy="motion"),
+        KeyframeInfo(frame_index=1, timestamp_sec=9.0,
+                     file_path=str(tmp_path / "m1.jpg"), strategy="motion"),
+    ]
+    monkeypatch.setattr(keyframe, "_extract_motion", lambda *a, **kw: motion_frames)
+    monkeypatch.setattr(keyframe, "_get_duration", lambda p: 30.0)
+    monkeypatch.setattr(keyframe, "_ensure_first_last", lambda *a, **kw: a[3])
+
+    def _no_interval(*a, **kw):
+        raise AssertionError("a partial motion result must not be topped up")
+
+    monkeypatch.setattr(keyframe, "_extract_interval", _no_interval)
+
+    frames = keyframe.extract_keyframes(
+        str(tmp_path / "x.mp4"), str(tmp_path), "vid",
+        strategy="motion", max_frames=8)
+
+    assert [f.strategy for f in frames] == ["motion", "motion"]
+
+
+# A stand-in for both ffmpeg and ffprobe. The filename deliberately contains no
+# "ffmpeg", because `_get_duration` builds the ffprobe path by string-replacing
+# it — so one script answers both calls.
+FAKE_FFMPEG = '''#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+if "-show_entries" in args:
+    sys.stdout.write("24.0\\n")
+elif "null" in args:
+    out = "Input #0, mov,mp4, from '/tmp/\\u5f71\\u7247\\u6a19\\u984c.mp4':\\n".encode("utf-8")
+    out += b"  Metadata: comment=\\xff\\xfe\\n"
+    for i, t in enumerate([0.0, 6.0, 12.0, 18.0]):
+        out += ("[Parsed_showinfo] n:%d pts_time:%.2f\\n" % (i, t)).encode("utf-8")
+    sys.stderr.buffer.write(out)
+    sys.stderr.buffer.flush()
+else:
+    open(args[-1], "wb").write(b"\\xff\\xd8\\xff")
+'''
+
+
+def test_motion_survives_stderr_the_console_locale_cannot_read(tmp_path):
+    # The test's own name must not contain the string this module rewrites
+    # to find ffprobe: pytest builds tmp_path out of it, and `_get_duration`
+    # would rewrite the fake binary's own directory out from under it.
+    """The kwarg assertion above cannot see this, and neither can an exit code.
+
+    ffmpeg echoes the input path and its metadata into the same stderr this
+    function parses. A CJK filename is therefore ordinary, and `text=True` on
+    its own decodes it with the console codepage — ASCII under this locale, so
+    the whole extraction dies on a UnicodeDecodeError that names none of the
+    above. The stray `\\xff\\xfe` is there for the other half: ffmpeg copies
+    metadata through without promising it is UTF-8, so the decode has to be
+    lenient as well as explicit.
+    """
+    fake = tmp_path / "fake_bin.py"
+    fake.write_text(FAKE_FFMPEG, encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    import reel_scout
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(
+        reel_scout.__file__)))
+
+    env = dict(os.environ, LC_ALL="C", LANG="C", PYTHONUTF8="0",
+               PYTHONCOERCECLOCALE="0", PYTHONPATH=repo_root)
+    env.pop("PYTHONIOENCODING", None)              # no rescue from outside
+
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import sys\n"
+         "from reel_scout import config\n"
+         "from reel_scout.vision import keyframe\n"
+         "config.FFMPEG_BIN = %r\n"
+         "frames = keyframe._extract_motion(%r, %r, 'vid', 4)\n"
+         "sys.stdout.write(','.join('%%.2f' %% f.timestamp_sec for f in frames))\n"
+         % (str(fake), str(tmp_path / "clip.mp4"), str(tmp_path))],
+        capture_output=True, env=env)
+
+    out = probe.stdout.decode("utf-8", "replace")
+    err = probe.stderr.decode("utf-8", "replace")
+    assert probe.returncode == 0, out + err
+    assert "UnicodeDecodeError" not in err, err
+    assert out.strip() == "0.00,6.00,12.00,18.00", (
+        "the timestamps have to come back intact, not merely not-crash: %r" % out)

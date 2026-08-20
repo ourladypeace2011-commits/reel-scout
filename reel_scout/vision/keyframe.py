@@ -356,6 +356,16 @@ def extract_keyframes(
             video_path, output_dir, video_id, max_frames,
             resolution, start_sec, end_sec,
         )
+        # Same guard as `scene`, and it became necessary for the same reason:
+        # the detection pass no longer exits early, so it can now time out, and
+        # a timeout used to leave motion with nothing. Deliberately NOT
+        # `len(frames) < max_frames` — that would quietly turn `motion` into
+        # `hybrid`. The defect is zero, so zero is what is fixed.
+        if not frames:
+            frames = _top_up_with_interval(
+                frames, video_path, output_dir, video_id, max_frames,
+                resolution, start_sec, end_sec,
+            )
     elif strategy == "hybrid":
         frames = _extract_scene(
             video_path, output_dir, video_id, max_frames,
@@ -421,7 +431,8 @@ def _get_duration(video_path: str) -> float:
         "-of", "csv=p=0",
         video_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=30)
     try:
         return float(result.stdout.strip())
     except (ValueError, TypeError):
@@ -453,8 +464,13 @@ def _top_up_with_interval(
     return frames
 
 
-def scene_timeout(duration_sec: float) -> int:
-    """How long scene detection may run, as a function of the clip.
+def detect_timeout(duration_sec: float) -> int:
+    """How long a detection pass may run, as a function of the clip.
+
+    Shared by `scene` and `motion`. Both have the same cost shape — decode the
+    file front to back applying a cheap filter — so they get the same budget
+    rather than two numbers that would drift apart. It was called
+    `scene_timeout` while scene was the only strategy that ran unbounded.
 
     Scene detection has to decode until it finds cuts; `-frames:v` only exits
     early once enough of them exist. A fixed 120s was fine while every clip was
@@ -472,6 +488,12 @@ def scene_timeout(duration_sec: float) -> int:
     Capping at all is safe only because a timeout is no longer fatal:
     extraction falls through to interval sampling, which seeks per frame and
     costs the same at any duration.
+
+    Measured for `motion` on the same fleet: a 22-minute clip's mpdecimate pass
+    took 37.5s, i.e. ~35x realtime, comfortably inside the 266s this grants it.
+    A 4-hour clip does not fit and falls through to interval — which is the
+    right answer, not a regression: what it used to return for that clip was
+    eight frames from the opening quarter-second carrying invented timestamps.
     """
     return int(min(max(120.0, duration_sec * 0.2), 300.0))
 
@@ -548,7 +570,8 @@ def _extract_scene(
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
-            timeout=scene_timeout(_get_duration(video_path)),
+            encoding="utf-8", errors="replace",
+            timeout=detect_timeout(_get_duration(video_path)),
         )
     except subprocess.TimeoutExpired:
         print("  Scene detection timed out — falling back to interval sampling",
@@ -592,39 +615,74 @@ def _extract_motion(
     video_path: str, output_dir: str, video_id: str, max_frames: int,
     resolution: int = 0, start_sec: float = 0.0, end_sec: float = 0.0,
 ) -> List[KeyframeInfo]:
-    """Extract keyframes using ffmpeg mpdecimate (high-motion frames)."""
-    pattern = os.path.join(output_dir, f"{video_id}_motion_%03d.jpg")
-    vf = "mpdecimate=hi=200:lo=100:frac=0.5,setpts=N/FRAME_RATE/TB,showinfo"
-    scale = _scale_vf(resolution)
-    if scale:
-        vf += "," + scale
+    """Extract keyframes using ffmpeg mpdecimate (high-motion frames).
+
+    Returns [] rather than raising when ffmpeg overruns, for the same reason
+    `_extract_scene` does: the caller has a cheaper strategy to fall back on,
+    and no frames at all costs the whole visual layer.
+    """
+    # Pass 1 -- find every moving frame. No `-frames:v`, no `setpts`, and no
+    # image encoding at all. Both of the things removed here were defects, and
+    # they compounded:
+    #
+    # `-frames:v max_frames` made ffmpeg exit as soon as N images existed.
+    # mpdecimate emits across the whole file (measured: 405 of a 13.7s reel's
+    # ~411 frames survive it), so the cap always fired within the opening
+    # second and the rest of the clip was never decoded. This is the same
+    # defect `_extract_scene` had, fixed the same way.
+    #
+    # `setpts=N/FRAME_RATE/TB` sat *before* `showinfo`, so the pts_time being
+    # parsed below was the output frame's ordinal over the frame rate, not its
+    # position in the video. Measured on a 10s clip built as 5s frozen + 5s
+    # moving: the old chain reported 0.00–0.27s for frames that actually came
+    # from 0.00s and 5.00–5.20s. Every motion keyframe ever written therefore
+    # carried a timestamp that was fiction, and anything aligned to it — OCR
+    # spans, marks, the inspector timeline — inherited that.
+    #
+    # No `_scale_vf` here either: scaling is a pass-2 concern, and scaling the
+    # frames mpdecimate judges would change which ones it considers moving.
+    vf = "mpdecimate=hi=200:lo=100:frac=0.5,showinfo"
     cmd = [config.FFMPEG_BIN]
     cmd += _seek_args(start_sec, end_sec)
-    cmd += [
-        "-i", video_path,
-        "-vf", vf,
-        "-vsync", "vfr",
-        "-frames:v", str(max_frames),
-        "-y",
-        pattern,
-    ]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=120,
-    )
+    cmd += ["-i", video_path, "-vf", vf, "-an", "-f", "null", "-"]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=detect_timeout(_get_duration(video_path)),
+        )
+    except subprocess.TimeoutExpired:
+        print("  Motion detection timed out — falling back to interval sampling",
+              file=sys.stderr)
+        return []
 
-    # Parse timestamps from showinfo output (in stderr). setpts already rebases pts
-    # to start at 0; add start_sec back to recover absolute video time when focused.
+    # Parse timestamps from showinfo output (in stderr). With input seeking (-ss
+    # before -i) ffmpeg resets pts to 0 at the seek point, so add start_sec back to
+    # recover absolute video time.
     offset = start_sec if (start_sec and start_sec > 0) else 0.0
-    frames = []
     ts_pattern = re.compile(r"pts_time:(\d+\.?\d*)")
-    matches = ts_pattern.findall(result.stderr)
+    stamps = [float(m) + offset for m in ts_pattern.findall(result.stderr)]
+    if not stamps:
+        return []
 
-    for i, ts_str in enumerate(matches[:max_frames]):
+    # Pass 2 -- grab only the frames we are keeping, seeking to each one. Spread
+    # over the time axis, not over the ordinal one: mpdecimate's output is dense
+    # wherever the clip is busy, so picking every m/n-th survivor would still
+    # bunch the budget up in the busiest stretch.
+    scale = _scale_vf(resolution)
+    frames = []
+    for i, idx in enumerate(select_spread(stamps, max_frames)):
+        ts = stamps[idx]
         fpath = os.path.join(output_dir, f"{video_id}_motion_{i+1:03d}.jpg")
+        cmd = [config.FFMPEG_BIN, "-ss", str(ts), "-i", video_path]
+        if scale:
+            cmd += ["-vf", scale]
+        cmd += ["-frames:v", "1", "-q:v", "2", "-y", fpath]
+        subprocess.run(cmd, capture_output=True, timeout=30)
         if os.path.exists(fpath):
             frames.append(KeyframeInfo(
                 frame_index=i,
-                timestamp_sec=float(ts_str) + offset,
+                timestamp_sec=ts,
                 file_path=fpath,
                 strategy="motion",
                 score=1.0,
