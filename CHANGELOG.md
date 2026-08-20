@@ -143,11 +143,37 @@
   images at all (`-f null -`); the second pass seeks to each selected timestamp.
   Selection
   spreads across the time axis rather than the ordinal one, so a clip whose cuts
-  cluster at the front no longer spends its whole budget there. **The `motion`
-  strategy still has the same defect** — `_extract_motion` caps its emitting pass
-  with `-frames:v max_frames`, so it keeps the first N high-motion frames rather
-  than a spread. It is not the default and was left for its own change, since the
-  fix is the same two-pass restructure and deserves its own tests.
+  cluster at the front no longer spends its whole budget there. The `motion`
+  strategy carried the same defect until the entry below.
+- **`motion` keyframes collapsed onto the opening quarter-second, and the
+  timestamps written beside them were invented.** Two defects, compounding.
+  `-frames:v max_frames` capped the emitting pass, and mpdecimate emits across
+  the whole file — measured, 405 of a 13.7-second reel's ~411 frames survive it
+  — so the cap always fired inside the first second and the rest of the clip was
+  never decoded. Underneath that, `setpts=N/FRAME_RATE/TB` sat *before*
+  `showinfo`, so the `pts_time` being parsed was the surviving frame's ordinal
+  over the frame rate rather than its position in the video: on a clip built as
+  5s frozen plus 5s moving, the old chain reported 0.00–0.27s for frames that
+  actually came from 0.00s and 5.00–5.20s. Every motion keyframe ever written
+  therefore carried a timestamp that was fiction, and anything aligned to one —
+  OCR spans, marks, the inspector timeline — inherited it. Same two-pass
+  restructure as `scene`: detection runs unbounded, writes no images (`-f null
+  -`) and no longer rewrites the clock, then `select_spread` picks across the
+  time axis and a second pass seeks to each chosen timestamp. Measured on four
+  library clips at a budget of 8, the sampled span went from 0.6–2.4% of clip
+  length to 99.3–99.8%. The unbounded pass costs real time — a 13.7s reel went
+  from 0.12s to 2.28s, a 37.5s reel from 0.19s to 4.48s, and a 22-minute clip
+  takes 37.5s — so detection now shares `scene`'s duration-scaled timeout
+  (renamed `detect_timeout`), and an overrun falls through to interval sampling
+  instead of ending the run with nothing.
+- **Three ffmpeg/ffprobe calls in the keyframe module read their output with the
+  console codepage.** `text=True` without `encoding` decodes with the locale's
+  encoding, and ffmpeg echoes the input path and its metadata into the same
+  stderr the timestamp parser reads — so a CJK filename under a cp950 or C
+  console killed the extraction with a `UnicodeDecodeError` that named nothing
+  relevant. All three now decode UTF-8 explicitly and leniently: what is parsed
+  out of that stream is ASCII digits, so a replacement character in a banner
+  line is cosmetic, whereas a strict decode would turn it into a crash.
 - **A model that reasons before answering spent the entire token budget
   reasoning.** At the old ceiling the reply came back `done_reason: "length"`
   with zero characters, which downstream is indistinguishable from a frame with
