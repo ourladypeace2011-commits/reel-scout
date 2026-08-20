@@ -20,6 +20,15 @@
   grain that is correct — two local VLMs are no more comparable to each other
   than an agent is to either. Per-video reads and the existing `score,*` CSV
   rows are byte-for-byte unchanged.
+- **`compare` put two scores side by side without saying which ruler each came
+  from.** Same defect as above, one surface over: the comparison table is the
+  single place a reader is most likely to turn two numbers into "A beats B",
+  and two clips scored by different models cannot support that reading at all.
+  The table now carries a `Score source` row, directly above the numbers it
+  qualifies — the same placement and the same reasoning as the `Transcript` row
+  added earlier. A score written before provenance existed reads as an em dash,
+  which is "scored, origin unrecorded" and deliberately not the same as having
+  no score.
 - **A stored media path stopped meaning anything once you changed directory.**
   `DATA_DIR` defaults to `./data` — relative to whatever cwd the process started
   in — so rows written from the repo root recorded `./data/videos/x.mp4` while
