@@ -99,19 +99,30 @@ def test_subtitles_are_fetched_after_media_lands(tmp_path, monkeypatch, no_rate_
     assert not [c for c in rec.calls if "--skip-download" in c]
 
 
-def test_media_format_prefers_anything_but_av1(tmp_path, monkeypatch, no_rate_limit):
-    """AV1 downloads fine and then will not play, which reads as a broken clip.
+def test_media_format_prefers_apple_playable_codecs(tmp_path, monkeypatch, no_rate_limit):
+    """A clip that downloads fine and then will not play reads as a broken clip.
 
-    Apple silicon only gained an AV1 hardware decoder in M3 and Safari will not
-    decode it in software, so an AV1 clip analyzes and scores normally while the
-    player shows a blank rectangle — with no message saying why. Chrome decodes
-    it in software, so the same library works for one viewer and not the next.
-    Measured on a real library: 13 of 99 downloaded files were AV1.
+    The player shows a blank rectangle and says nothing, while the transcript,
+    score and keyframes all come out normal. Chrome decodes what Safari will
+    not, so the same library works for one viewer and not the next.
 
-    Two halves are asserted because either alone is a trap. Without the codec
-    filter the default "best" keeps handing back AV1. Without the unconstrained
-    tail, a video published only in AV1 stops being ingestable at all — and a
-    clip that will not play is still worth its transcript, keyframes and score.
+    This assertion started life as "anything but AV1" and that was too narrow.
+    Excluding av01 lets VP9 through, and VP9 in an MP4 container — which is
+    what this crawler builds, via --merge-output-format mp4 — does not play on
+    iOS/iPadOS at all (Safari decodes VP9 only inside WebM). Opus audio in MP4
+    fails on Apple platforms for the same reason. Measured on the real library
+    2026-08-21, 109 files: 86 vp9+aac, 13 vp9+opus, 2 av1+opus, 2 h264+opus,
+    and only 4 h264+aac. The av01 filter was green the whole time.
+
+    So the preferred branches now name H.264 and AAC positively instead of
+    naming one bad codec negatively — a denylist only ever excludes the codec
+    somebody already got burned by.
+
+    Both halves are asserted because either alone is a trap. Without the codec
+    preference the default "best" keeps handing back VP9. Without the
+    unconstrained tail, a video published only in VP9 or AV1 stops being
+    ingestable at all — and a clip that will not play is still worth its
+    transcript, keyframes and score.
     """
     rec = _run(monkeypatch, _Recorder(str(tmp_path)))
     YouTubeCrawler().download(URL, str(tmp_path))
@@ -121,12 +132,17 @@ def test_media_format_prefers_anything_but_av1(tmp_path, monkeypatch, no_rate_li
     alternatives = fmt.split("/")
 
     assert alternatives[0].startswith("bestvideo[")
-    assert "vcodec!*=av01" in alternatives[0]
-    # every preferred branch, not just the first, or the second one reintroduces it
-    for alt in alternatives[:2]:
-        assert "vcodec!*=av01" in alt
-    # ...and a tail with no codec constraint, so AV1-only uploads still land
-    assert any("vcodec" not in alt for alt in alternatives[2:])
+    # the first branch pins both halves: H.264 video AND AAC audio. Video alone
+    # is not enough — Opus in MP4 is just as dead on Apple as VP9 is.
+    assert "vcodec^=avc1" in alternatives[0]
+    assert "acodec^=mp4a" in alternatives[0]
+    # every preferred branch, not just the first, or the next one reintroduces VP9
+    for alt in alternatives[:3]:
+        assert "vcodec^=avc1" in alt
+    # the older av01-free rungs stay in the middle of the chain
+    assert any("vcodec!*=av01" in alt for alt in alternatives[3:])
+    # ...and a tail with no codec constraint, so VP9/AV1-only uploads still land
+    assert any("vcodec" not in alt for alt in alternatives[3:])
 
 
 # --- download-layer fallback (2026-08-15) --------------------------------
