@@ -25,6 +25,13 @@ class _Recorder:
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
 
+        if any("ffprobe" in str(part) for part in cmd):
+            # Not a yt-dlp call. The landed-file codec check probes with
+            # ffprobe, and this double stands in for yt-dlp only -- answering
+            # it the way yt-dlp is answered (by writing the media file) would
+            # overwrite the very leftover some of these tests assert on.
+            return _Done(0, stdout="h264" + chr(10))
+
         if "--dump-json" in cmd:
             return _Done(0, stdout=json.dumps(
                 {"title": "T", "uploader": "U", "duration": 12, "upload_date": "20260101"}
@@ -106,13 +113,25 @@ def test_media_format_prefers_apple_playable_codecs(tmp_path, monkeypatch, no_ra
     score and keyframes all come out normal. Chrome decodes what Safari will
     not, so the same library works for one viewer and not the next.
 
-    This assertion started life as "anything but AV1" and that was too narrow.
-    Excluding av01 lets VP9 through, and VP9 in an MP4 container — which is
-    what this crawler builds, via --merge-output-format mp4 — does not play on
-    iOS/iPadOS at all (Safari decodes VP9 only inside WebM). Opus audio in MP4
-    fails on Apple platforms for the same reason. Measured on the real library
-    2026-08-21, 109 files: 86 vp9+aac, 13 vp9+opus, 2 av1+opus, 2 h264+opus,
-    and only 4 h264+aac. The av01 filter was green the whole time.
+    This assertion started life as "anything but AV1" and that was too narrow:
+    excluding av01 lets VP9 through, and VP9 was what the library was full of.
+
+    Measured on a real iPad 2026-08-25, one variable at a time -- same clip,
+    same server, only the video codec swapped:
+
+        h264 + aac   plays        vp9 + aac    does NOT play
+        h264 + opus  plays        vp9 + opus   does NOT play
+                                  av1 + opus   does NOT play
+
+    The video codec is the whole story; the audio codec is irrelevant. On the
+    audited library that is 103 of 109 files unplayable (88 vp9+aac, 13
+    vp9+opus, 2 av1+opus), while the av01 filter stayed green throughout.
+
+    The earlier version of this docstring asserted a mechanism ("Safari decodes
+    VP9 only inside WebM", "Opus in MP4 fails on Apple") that was platform lore,
+    not measurement. The Opus half turned out to be false. Kept here as a
+    reminder that the actionable rule -- name the codec you want -- never
+    depended on the mechanism being right.
 
     So the preferred branches now name H.264 and AAC positively instead of
     naming one bad codec negatively — a denylist only ever excludes the codec
@@ -356,3 +375,73 @@ def test_a_zero_exit_that_produced_no_file_is_still_a_failure(
     _run(monkeypatch, _SucceedsWithoutWriting(str(tmp_path)))
     with pytest.raises(RuntimeError, match="download failed"):
         YouTubeCrawler().download(URL, str(tmp_path))
+
+
+# --- the gap PR #78 left (2026-08-25) ------------------------------------
+#
+# PR #78 fixed youtube.py and stopped there. instagram.py and tiktok.py were
+# still on a bare "bestvideo+bestaudio/best" with no codec condition at all --
+# and 88 of the 103 unplayable files in the audited library came through the
+# Instagram path. Only youtube.py was fixed because only a YouTube clip had
+# been opened on a phone.
+
+
+def test_apple_safe_format_names_h264_positively_at_every_preferred_rung():
+    """A denylist only ever excludes the codec somebody already got burned by.
+
+    Both halves matter: the preferred rungs must name avc1, and the tail must
+    stay unconstrained so a VP9-only or AV1-only upload still enters the
+    library.
+    """
+    from reel_scout.crawl import ytdlp
+
+    alts = ytdlp.apple_safe_format().split("/")
+    assert "vcodec^=avc1" in alts[0] and "acodec^=mp4a" in alts[0]
+    for alt in alts[:3]:
+        assert "vcodec^=avc1" in alt
+    assert any("vcodec!*=av01" in a for a in alts[3:])
+    assert any("vcodec" not in a for a in alts[3:])
+    assert "height" not in ytdlp.apple_safe_format()
+    assert "[height<=720]" in ytdlp.apple_safe_format(720)
+
+
+def test_probe_video_codec_survives_the_side_data_trailing_comma():
+    """`-of csv=p=0` emits a trailing empty field when the stream carries side
+    data: two files in the real library probed as "vp9," rather than "vp9".
+
+    Reading that raw is how a scan turned into a claim about "two video
+    streams" that did not exist. Splitting on the comma is the whole fix.
+    """
+    import subprocess
+
+    from reel_scout import ffprobe
+
+    class _R:
+        returncode = 0
+        stdout = "vp9,\n"
+
+    orig = subprocess.run
+    subprocess.run = lambda *a, **k: _R()
+    try:
+        assert ffprobe.probe_video_codec("whatever.mp4") == "vp9"
+    finally:
+        subprocess.run = orig
+
+
+def test_probe_video_codec_returns_none_when_it_cannot_measure():
+    """None means "could not measure", never "fine" -- a failed probe must not
+    read as a pass."""
+    import subprocess
+
+    from reel_scout import ffprobe
+
+    class _R:
+        returncode = 1
+        stdout = ""
+
+    orig = subprocess.run
+    subprocess.run = lambda *a, **k: _R()
+    try:
+        assert ffprobe.probe_video_codec("whatever.mp4") is None
+    finally:
+        subprocess.run = orig

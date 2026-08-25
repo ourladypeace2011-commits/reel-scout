@@ -10,10 +10,12 @@ nominal 60s rather than skipping extraction.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import Optional
 
 from . import config
+from .utils.stderr import warn
 
 
 def probe_duration(path: str) -> Optional[float]:
@@ -35,3 +37,62 @@ def probe_duration(path: str) -> Optional[float]:
         return float(result.stdout.strip())
     except (ValueError, TypeError, OSError, subprocess.SubprocessError):
         return None
+
+
+#: Video codecs Apple's MP4 pipeline will actually render. Measured on a real
+#: iPad 2026-08-25: h264 plays, vp9 does not, av1 does not. Audio codec is not
+#: part of this -- `h264 + opus` plays with sound.
+APPLE_PLAYABLE_VIDEO_CODECS = frozenset(("h264", "hevc"))
+
+
+def probe_video_codec(path: str) -> Optional[str]:
+    """Codec name of the first video stream, or ``None`` if it can't be read.
+
+    ``None`` means "could not measure", never "fine" -- callers must not read a
+    failed probe as a pass.
+    """
+    cmd = [
+        config.FFMPEG_BIN.replace("ffmpeg", "ffprobe"),
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "csv=p=0",
+        path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    # csv=p=0 can emit a trailing empty field when the stream carries side data
+    # (seen on two files in the real library: "vp9," not "vp9"). Splitting on
+    # the comma is the difference between reading the codec and inventing a
+    # second video stream that was never there.
+    name = result.stdout.strip().split(",")[0].strip()
+    return name or None
+
+
+def warn_if_not_apple_playable(path: str, label: str = "") -> Optional[str]:
+    """Probe the file that actually landed and say so loudly if it will not play.
+
+    This is the only place in the pipeline that measures the artifact instead of
+    the request. The format selector states a preference; yt-dlp is free to fall
+    down the chain to an unconstrained rung, and until this check existed the
+    difference was invisible -- the clip downloaded, analyzed and scored
+    perfectly, and failed only when a human opened it on an iPhone or iPad.
+
+    Returns the codec it measured (``None`` if it could not measure), and never
+    raises: a probe failure must not cost a download that already succeeded.
+    """
+    codec = probe_video_codec(path)
+    if codec is None:
+        warn("  codec check: could not probe %s -- playability unverified"
+             % (label or os.path.basename(path)))
+        return None
+    if codec not in APPLE_PLAYABLE_VIDEO_CODECS:
+        warn("  codec check: %s landed as %s -- will NOT play on iOS/iPadOS "
+             "Safari (Apple's MP4 path takes h264/hevc only). The clip is still "
+             "usable for transcript/keyframes/score."
+             % (label or os.path.basename(path), codec))
+    return codec
