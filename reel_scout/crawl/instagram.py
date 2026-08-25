@@ -11,6 +11,7 @@ from .rate_limiter import get_limiter
 from . import ytdlp
 from .. import config
 from .. import ffprobe
+from ..utils.stderr import warn
 
 
 class InstagramCrawler(BaseCrawler):
@@ -91,7 +92,15 @@ class InstagramCrawler(BaseCrawler):
             # analyzed and scored perfectly and failed only when a human opened
             # it on a phone. Warn, never fail: a bad codec is still worth its
             # transcript, keyframes and score.
-            ffprobe.warn_if_not_apple_playable(file_path, os.path.basename(file_path))
+            try:
+                ffprobe.warn_if_not_apple_playable(file_path, os.path.basename(file_path))
+            except Exception as exc:  # noqa: BLE001 - see below
+                # The promise "a failed probe never costs a download that already
+                # succeeded" has to be kept here, where the download is. ffprobe
+                # catches the failures it knows about; this catches the ones it
+                # does not. A missing binary must not turn a working clip into an
+                # exception three frames up the stack.
+                warn("  codec check skipped: %r" % (exc,))
 
         # yt-dlp routinely reports no duration for Instagram. Writing 0.0 is
         # worse than it looks: it is a *real* value, so the COALESCE-based

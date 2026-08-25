@@ -838,6 +838,79 @@ def scan_script_mix(text: str) -> Tuple[int, int]:
     return trad, simp
 
 
+#: How far past the end of the media a transcript may run before it is worth
+#: saying something. Whisper pads to its 30s decode window, so a little
+#: overshoot is normal and nagging about it would train people to ignore the
+#: warning. Measured on the reference library: 72 of 75 transcripts land within
+#: 0.3% of the media duration, and the three that do not overshoot by 149%,
+#: 249% and 369%. There is nothing in between.
+_OVERRUN_RATIO = 1.1
+_OVERRUN_SLACK_SEC = 0.5
+
+
+def scan_transcript_overrun(segments_json: str, duration_sec: float):
+    """(last_end, ratio) when the transcript runs past the media, else None.
+
+    Whisper on speech-less audio does one of two things: it returns nothing, or
+    it invents. In this library it returned nothing 23 times (all tagged `nn` --
+    Norwegian Nynorsk, which is what Whisper guesses at silence) and invented 3
+    times, and only the second kind reaches the database. The invented ones are
+    recognisable without knowing the phrase: they claim to describe more media
+    than exists.
+
+    Detect, do not truncate -- same reason `scan_script_mix` does not convert.
+    Clamping the timestamps would leave a plausible-looking transcript of a clip
+    that has no speech in it, which is the harm, not the timestamps.
+    """
+    if not segments_json or not duration_sec or duration_sec <= 0:
+        return None
+    try:
+        segs = json.loads(segments_json)
+    except (ValueError, TypeError):
+        return None
+    if not segs:
+        return None
+    try:
+        last_end = max(float(x.get("end", 0) or 0) for x in segs)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if last_end <= duration_sec * _OVERRUN_RATIO + _OVERRUN_SLACK_SEC:
+        return None
+    return last_end, last_end / duration_sec
+
+
+_script_mix_warned = set()
+
+
+def warn_script_mix(text: str, where: str) -> None:
+    """Report traditional/simplified mixing in generated text.
+
+    `save_transcript` has watched transcripts for this since it was written, but
+    the VLM and LLM write into the same database and were never looked at: 28
+    frame descriptions, 2 object lists and 2 analysis blobs in the reference
+    library carry simplified characters. Descriptions feed search, so a
+    simplified one is a description that will not be found by a search typed the
+    way everything else in the library is written.
+
+    Deliberately NOT applied to `text_in_frame` or `ocr_captions`: that text is
+    evidence of what the video actually showed. Flagging it as a mix would be
+    treating the video's own choice as a defect.
+
+    Warns once per surface per process. 12,582 description fields is not a
+    thing to print 28 warnings about, and the second one adds nothing the first
+    did not say.
+    """
+    if not text or where in _script_mix_warned:
+        return
+    trad, simp = scan_script_mix(text)
+    if trad and simp:
+        _script_mix_warned.add(where)
+        warn("  ⚠️  %s mixes traditional and simplified (%d / %d) — generated "
+             "text, not transcribed speech, so this is the model ignoring the "
+             "prompt rather than the speaker switching. Reported once per run."
+             % (where, trad, simp))
+
+
 def save_transcript(
     conn: sqlite3.Connection,
     video_id: str,
@@ -863,6 +936,11 @@ def save_transcript(
     # and a detector that loses the data it was watching is worse than no
     # detector — see utils.stderr.warn for the console-encoding case that made
     # this concrete rather than theoretical.
+    # A transcript that ends after the media does is describing audio that is
+    # not there. Scanned here rather than in the backend because this is where
+    # both halves are in scope: the segments and the measured duration.
+    overrun = scan_transcript_overrun(segments_json, duration_sec)
+
     notice = None
     if text_full:
         trad, simp = scan_script_mix(text_full)
@@ -884,6 +962,12 @@ def save_transcript(
     conn.commit()
     if notice:
         warn(notice)
+    if overrun:
+        last_end, ratio = overrun
+        warn("  ⚠️  transcript runs %.1fs past a %.1fs file (%.0f%% of it) — "
+             "Whisper hallucinating over speech-less audio looks exactly like "
+             "this, and whisper-guard does not catch it. Check before trusting "
+             "the text." % (last_end - duration_sec, duration_sec, 100.0 * ratio))
 
 
 def get_transcript(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:
@@ -1029,6 +1113,8 @@ def save_vision_description(
         (keyframe_id, description, objects_json, text_in_frame, vlm_backend, vlm_model),
     )
     conn.commit()
+    # `text_in_frame` is excluded on purpose -- see warn_script_mix.
+    warn_script_mix(description, "frame description")
 
 
 # --- Audio Events CRUD ---
@@ -1202,6 +1288,7 @@ def save_analysis(
     except (ValueError, TypeError):
         data = {}
     tags = _extract_tag_columns(data)
+    warn_script_mix(summary, "analysis summary")
     conn.execute(
         """INSERT OR REPLACE INTO analyses
            (video_id, summary, topics_json, hooks_json, style_json,
