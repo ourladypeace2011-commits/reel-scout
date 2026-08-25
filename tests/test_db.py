@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -556,3 +557,82 @@ def test_a_non_url_reference_is_not_run_through_the_crawler_registry():
     finally:
         conn.close()
         os.unlink(path)
+
+
+# --- 2026-08-25 audit of the real library ---------------------------------
+
+
+def test_a_transcript_that_outlives_its_media_is_reported():
+    """Whisper on speech-less audio either returns nothing or invents, and only
+    the invented kind reaches the database.
+
+    Three transcripts in the reference library ran past the end of the file --
+    one 6.4s clip carried a single segment 0.0-30.0 reading "Thanks for
+    watching!". whisper-guard was installed and enabled the whole time. The
+    tell that does not need the phrase: it claims to describe more media than
+    exists.
+    """
+    from reel_scout import db
+
+    hit = db.scan_transcript_overrun(
+        json.dumps([{"start": 0.0, "end": 30.0, "text": "Thanks for watching!"}]), 6.4)
+    assert hit is not None
+    last_end, ratio = hit
+    assert last_end == 30.0
+    assert ratio > 4
+
+
+def test_whispers_normal_window_padding_is_not_reported():
+    """The rule has to survive the normal case or it trains people to ignore it.
+
+    72 of 75 transcripts in the reference library land within 0.3% of the media
+    duration; a decode window that runs a few tenths long is not a finding.
+    """
+    from reel_scout import db
+
+    assert db.scan_transcript_overrun(
+        json.dumps([{"start": 0.0, "end": 60.2}]), 60.0) is None
+    assert db.scan_transcript_overrun(
+        json.dumps([{"start": 0.0, "end": 827.0}]), 827.014) is None
+
+
+def test_overrun_scan_returns_none_rather_than_guessing():
+    """No segments, no duration, or unparseable JSON is "cannot tell" -- it must
+    not surface as either a finding or a clean bill of health."""
+    from reel_scout import db
+
+    assert db.scan_transcript_overrun("", 10.0) is None
+    assert db.scan_transcript_overrun("[]", 10.0) is None
+    assert db.scan_transcript_overrun("not json", 10.0) is None
+    assert db.scan_transcript_overrun(json.dumps([{"end": 99.0}]), 0) is None
+
+
+def test_generated_text_is_watched_for_script_mixing_once_per_surface(capsys):
+    """`save_transcript` has watched transcripts for this since it was written.
+    The VLM writes into the same database and was never looked at -- 28 frame
+    descriptions in the reference library carry simplified characters.
+
+    Once per surface, not once per row: 12,582 description fields is not a
+    thing to print 28 warnings about.
+    """
+    from reel_scout import db
+
+    db._script_mix_warned.clear()
+    mixed = "這個場景" + "这个场景"
+    db.warn_script_mix(mixed, "frame description")
+    first = capsys.readouterr().err
+    db.warn_script_mix(mixed, "frame description")
+    second = capsys.readouterr().err
+
+    assert "frame description" in first
+    assert second == ""
+    db._script_mix_warned.clear()
+
+
+def test_text_that_is_all_one_script_says_nothing(capsys):
+    from reel_scout import db
+
+    db._script_mix_warned.clear()
+    db.warn_script_mix("這個場景很好", "frame description")
+    assert capsys.readouterr().err == ""
+    db._script_mix_warned.clear()
