@@ -76,14 +76,24 @@ def probe_video_codec(path: str) -> Optional[str]:
 def warn_if_not_apple_playable(path: str, label: str = "") -> Optional[str]:
     """Probe the file that actually landed and say so loudly if it will not play.
 
-    This is the only place in the pipeline that measures the artifact instead of
-    the request. The format selector states a preference; yt-dlp is free to fall
-    down the chain to an unconstrained rung, and until this check existed the
-    difference was invisible -- the clip downloaded, analyzed and scored
-    perfectly, and failed only when a human opened it on an iPhone or iPad.
+    This is the first check that asserts the property a gate promises -- namely
+    playability -- about the file that actually landed. It is NOT the first thing
+    in the pipeline to look at a landed file: ``probe_duration`` above has done
+    that since PR #50 (2026-07-27), and ``analyze.pipeline`` stats the file for
+    its size. The earlier wording here claimed "the only place in the pipeline
+    that measures the artifact instead of the request", which was a universal
+    that the code right above it contradicts; narrowed 2026-08-25.
 
-    Returns the codec it measured (``None`` if it could not measure), and never
-    raises: a probe failure must not cost a download that already succeeded.
+    The distinction still matters: the format selector states a preference, and
+    yt-dlp is free to fall down the chain to an unconstrained rung. Until this
+    check existed the difference was invisible -- the clip downloaded, analyzed
+    and scored perfectly, and failed only when a human opened it on an iPhone or
+    iPad.
+
+    Returns the codec it measured (``None`` if it could not measure). It catches
+    the failures it knows about, but callers must not treat that as "never
+    raises" -- the crawlers wrap the call, because a probe failure must not cost
+    a download that already succeeded.
     """
     codec = probe_video_codec(path)
     if codec is None:
