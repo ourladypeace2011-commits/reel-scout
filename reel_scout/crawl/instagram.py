@@ -65,8 +65,11 @@ class InstagramCrawler(BaseCrawler):
         info = json.loads(result.stdout)
 
         # Download
+        # Was a bare "bestvideo+bestaudio/best" -- no codec condition at all,
+        # not even the av01 exclusion youtube.py carried. 88 of the 103
+        # unplayable files in the 2026-08-25 audit came through this line.
         dl_cmd = base_cmd + [
-            "-f", "bestvideo+bestaudio/best",
+            "-f", ytdlp.apple_safe_format(),
             "--merge-output-format", "mp4",
             "-o", output_template,
             url,
@@ -80,6 +83,15 @@ class InstagramCrawler(BaseCrawler):
         expected = os.path.join(output_dir, f"ig_{post_id}.mp4")
         file_path = expected if os.path.exists(expected) else ""
         file_size = os.path.getsize(file_path) if file_path else 0
+
+        if file_path:
+            # The selector states a preference; yt-dlp is free to walk down to
+            # an unconstrained rung. Until this line existed, nothing anywhere
+            # measured the file that actually landed -- the clip downloaded,
+            # analyzed and scored perfectly and failed only when a human opened
+            # it on a phone. Warn, never fail: a bad codec is still worth its
+            # transcript, keyframes and score.
+            ffprobe.warn_if_not_apple_playable(file_path, os.path.basename(file_path))
 
         # yt-dlp routinely reports no duration for Instagram. Writing 0.0 is
         # worse than it looks: it is a *real* value, so the COALESCE-based

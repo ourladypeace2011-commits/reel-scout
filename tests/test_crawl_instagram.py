@@ -128,7 +128,7 @@ def _run_download(info_json, probed):
          patch("reel_scout.crawl.instagram.os.path.exists", return_value=True), \
          patch("reel_scout.crawl.instagram.os.path.getsize", return_value=1234), \
          patch("reel_scout.crawl.instagram.ffprobe.probe_duration",
-               return_value=probed) as probe:
+               return_value=probed) as probe,          patch("reel_scout.crawl.instagram.ffprobe.warn_if_not_apple_playable"):
         meta = c.download(CANONICAL, output_dir="/tmp")
     return meta, probe
 
@@ -154,3 +154,49 @@ def test_a_duration_yt_dlp_does_report_is_trusted_without_probing():
 def test_an_unprobeable_file_stays_zero_rather_than_inventing_a_number():
     meta, _ = _run_download('{"id": "x"}', None)
     assert meta.duration_sec == 0.0
+
+
+# --- the drift PR #78 did not cover (2026-08-25) -------------------------
+#
+# This file's crawler spent months on a bare "bestvideo+bestaudio/best" -- no
+# codec condition at all, not even the av01 exclusion youtube.py carried. 88 of
+# the 103 files that would not play on an iPad came through it. Nothing failed
+# when that happened, because nothing asserted anything about the selector.
+
+
+def test_download_asks_for_a_codec_apple_can_decode():
+    """Assert on the argv this crawler actually sends, not on the shared helper.
+
+    A test that only exercises ytdlp.apple_safe_format() would stay green while
+    this module went back to a bare selector -- which is precisely the failure
+    being prevented.
+    """
+    c = InstagramCrawler()
+    calls = []
+
+    def _rec(cmd, **kw):
+        calls.append(cmd)
+        return MagicMock(returncode=0, stdout='{"id": "x", "duration": 5}')
+
+    with _patch_basecmd(),          patch("reel_scout.crawl.instagram.get_limiter"),          patch("reel_scout.crawl.instagram.subprocess.run", side_effect=_rec),          patch("reel_scout.crawl.instagram.os.path.exists", return_value=True),          patch("reel_scout.crawl.instagram.os.path.getsize", return_value=1234),          patch("reel_scout.crawl.instagram.ffprobe.warn_if_not_apple_playable"):
+        c.download(CANONICAL, output_dir="/tmp")
+
+    dl = [x for x in calls if "--merge-output-format" in x][0]
+    fmt = dl[dl.index("-f") + 1]
+    alts = fmt.split("/")
+    assert "vcodec^=avc1" in alts[0]
+    assert "acodec^=mp4a" in alts[0]
+    # and the tail stays unconstrained, so a VP9-only reel still enters the library
+    assert any("vcodec" not in a for a in alts[3:])
+
+
+def test_download_measures_the_file_that_actually_landed():
+    """The selector states a preference; yt-dlp may walk down to the
+    unconstrained tail. Something has to look at what arrived."""
+    c = InstagramCrawler()
+
+    with _patch_basecmd(),          patch("reel_scout.crawl.instagram.get_limiter"),          patch("reel_scout.crawl.instagram.subprocess.run",
+               return_value=MagicMock(returncode=0, stdout='{"id": "x", "duration": 5}')),          patch("reel_scout.crawl.instagram.os.path.exists", return_value=True),          patch("reel_scout.crawl.instagram.os.path.getsize", return_value=1234),          patch("reel_scout.crawl.instagram.ffprobe.warn_if_not_apple_playable") as chk:
+        c.download(CANONICAL, output_dir="/tmp")
+
+    chk.assert_called_once()

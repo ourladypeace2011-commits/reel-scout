@@ -43,6 +43,50 @@ def base_cmd() -> Tuple[str, ...]:
     return ("yt-dlp",)
 
 
+# Measured on a real iPad, 2026-08-25, one variable at a time (same clip,
+# same server, only the video codec swapped):
+#
+#     h264 + aac   plays        vp9 + aac    does NOT play
+#     h264 + opus  plays        vp9 + opus   does NOT play
+#                               av1 + opus   does NOT play
+#
+# The video codec is the whole story. Apple's MP4 path takes H.264 (and HEVC);
+# VP9 and AV1 do not play. The audio codec turned out to be irrelevant --
+# `h264 + opus` plays with sound, so the earlier belief that Opus-in-MP4 is
+# dead on Apple was wrong. `acodec^=mp4a` is kept as a first preference anyway:
+# it costs nothing when AAC is available and it is one fewer thing to be wrong
+# about.
+#
+# On the library that produced this measurement, 103 of 109 files were
+# unplayable, and 88 of those came through the Instagram path -- which had no
+# codec condition at all until this change.
+APPLE_SAFE_MAX_HEIGHT_DEFAULT = None
+
+
+def apple_safe_format(max_height: int = None) -> str:
+    """yt-dlp ``-f`` chain preferring what Apple's media stack can decode.
+
+    Positive selection, not a denylist. The previous chain here excluded
+    ``av01`` and nothing else, so VP9 walked straight through it -- and VP9 was
+    what the library was actually full of. Naming the good codec fails toward
+    "we passed on a clip"; naming a bad one fails toward "we ingested something
+    that will not play", and nobody sees that until they open it on a phone.
+
+    The tail stays unconstrained on purpose: a clip published only in VP9 or
+    AV1 still enters the library. A transcript, keyframes and a score are worth
+    having even when the player will not render it.
+    """
+    h = "[height<=%d]" % max_height if max_height else ""
+    return (
+        "bestvideo{h}[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+        "best{h}[vcodec^=avc1][acodec^=mp4a]/"
+        "bestvideo{h}[vcodec^=avc1]+bestaudio/"
+        "bestvideo{h}[vcodec!*=av01]+bestaudio/"
+        "best{h}[vcodec!*=av01]/"
+        "bestvideo{h}+bestaudio/best{h}"
+    ).format(h=h) + ("/best" if h else "")
+
+
 def cmd(*args: str) -> List[str]:
     """yt-dlp base invocation + the given arguments, ready for subprocess.run."""
     return list(base_cmd()) + list(args)

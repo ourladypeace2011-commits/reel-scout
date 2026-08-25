@@ -10,6 +10,7 @@ from .base import BaseCrawler, VideoMeta
 from .rate_limiter import get_limiter
 from . import ytdlp
 from .. import config
+from .. import ffprobe
 from ..utils.stderr import warn
 
 
@@ -103,30 +104,22 @@ class YouTubeCrawler(BaseCrawler):
         # down with it. --no-abort-on-error does not prevent that: it governs
         # whether yt-dlp continues to the *next* playlist entry, not whether one
         # entry survives a partial failure.
-        # Ask for what Apple's media stack can actually decode: H.264 video
-        # with AAC audio. Anything else downloads, analyzes and scores
-        # perfectly while the player shows a blank rectangle — with nothing
-        # saying why. Chrome decodes it, so the same library plays for one
-        # person and not the next: the shape of bug nobody reports correctly.
+        # Prefer what Apple's media stack can actually decode. The chain (and
+        # the measurement behind it) lives in ytdlp.apple_safe_format() so the
+        # Instagram and TikTok crawlers cannot drift away from it -- they did,
+        # for months, and that is where 88 of the 103 unplayable files came
+        # from.
         #
-        # AV1 was the first codec caught doing this (hardware decode only from
-        # M3 on; Safari will not fall back to software). VP9 was left alone at
-        # the time, with the note "it is the common case here and it plays" —
-        # that was measured on desktop Chrome and it is wrong. Safari on
-        # iOS/iPadOS decodes VP9 only inside WebM; inside the MP4 container
-        # this crawler asks for (--merge-output-format mp4) it plays nothing.
-        # Opus audio in MP4 fails on Apple platforms for the same reason.
-        #
-        # Measured on the real library 2026-08-21, 109 files: 86 vp9+aac,
-        # 13 vp9+opus, 2 av1+opus, 2 h264+opus — only 4 were h264+aac. The
-        # library was unplayable on iPad while every one of those files played
-        # in desktop Chrome, and the av01 filter reported no problem the whole
-        # time because AV1 was never the codec doing the damage.
-        #
-        # The chain degrades rather than fails, and the av01-free rungs stay in
-        # the middle: a video published only in VP9 or AV1 still downloads on
-        # the tail — a blank player is worse than nothing, but refusing to
-        # ingest at all is worse than both.
+        # Two corrections to what this comment used to claim, both from a real
+        # iPad on 2026-08-25 rather than from platform lore:
+        #   - it said VP9 is decoded "only inside WebM". What was measured is
+        #     narrower and sufficient: vp9-in-mp4 does not play. Same clip,
+        #     same server, re-encoded to h264 -> plays. One variable.
+        #   - it said Opus in MP4 "fails on Apple platforms for the same
+        #     reason". That is wrong. h264 + opus plays, with sound. The audio
+        #     codec was never part of this.
+        # AV1 does not play either, consistent with it needing a hardware
+        # decoder that this device lacks.
         expected = os.path.join(output_dir, f"yt_{vid}.mp4")
         # A leftover file at the destination makes yt-dlp exit 0 without
         # transferring anything, and the checks below read that as success.
@@ -146,14 +139,7 @@ class YouTubeCrawler(BaseCrawler):
                 capture_output=True, text=True, timeout=300,
             )
 
-        result = _download(
-            "bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-            "best[height<=720][vcodec^=avc1][acodec^=mp4a]/"
-            "bestvideo[height<=720][vcodec^=avc1]+bestaudio/"
-            "bestvideo[height<=720][vcodec!*=av01]+bestaudio/"
-            "best[height<=720][vcodec!*=av01]/"
-            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-        )
+        result = _download(ytdlp.apple_safe_format(720))
 
         if not _landed(result, expected):
             # The `/` chain above only degrades while *choosing* a format. Once a
@@ -196,6 +182,15 @@ class YouTubeCrawler(BaseCrawler):
             raise RuntimeError(f"yt-dlp download failed: {ytdlp.format_error(result.stderr)}")
         file_path = expected
         file_size = os.path.getsize(file_path) if file_path else 0
+
+        if file_path:
+            # The selector states a preference; yt-dlp is free to walk down to
+            # an unconstrained rung. Until this line existed, nothing anywhere
+            # measured the file that actually landed -- the clip downloaded,
+            # analyzed and scored perfectly and failed only when a human opened
+            # it on a phone. Warn, never fail: a bad codec is still worth its
+            # transcript, keyframes and score.
+            ffprobe.warn_if_not_apple_playable(file_path, os.path.basename(file_path))
 
         self._fetch_subtitles(url, output_template)
 

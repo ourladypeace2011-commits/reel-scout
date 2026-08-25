@@ -10,6 +10,7 @@ from .base import BaseCrawler, VideoMeta
 from .rate_limiter import get_limiter
 from . import ytdlp
 from .. import config
+from .. import ffprobe
 
 
 class TikTokCrawler(BaseCrawler):
@@ -55,8 +56,10 @@ class TikTokCrawler(BaseCrawler):
             output_template = os.path.join(output_dir, f"tt_{vid}.%(ext)s")
 
         # Download
+        # Same bare selector instagram.py had; no clip in the audited library
+        # came from here, which is exactly why it went unnoticed.
         dl_cmd = ytdlp.cmd(
-            "-f", "bestvideo+bestaudio/best",
+            "-f", ytdlp.apple_safe_format(),
             "--merge-output-format", "mp4",
             "-o", output_template,
             url,
@@ -70,6 +73,15 @@ class TikTokCrawler(BaseCrawler):
         expected = os.path.join(output_dir, f"tt_{vid}.mp4")
         file_path = expected if os.path.exists(expected) else ""
         file_size = os.path.getsize(file_path) if file_path else 0
+
+        if file_path:
+            # The selector states a preference; yt-dlp is free to walk down to
+            # an unconstrained rung. Until this line existed, nothing anywhere
+            # measured the file that actually landed -- the clip downloaded,
+            # analyzed and scored perfectly and failed only when a human opened
+            # it on a phone. Warn, never fail: a bad codec is still worth its
+            # transcript, keyframes and score.
+            ffprobe.warn_if_not_apple_playable(file_path, os.path.basename(file_path))
 
         return VideoMeta(
             platform=self.platform,
