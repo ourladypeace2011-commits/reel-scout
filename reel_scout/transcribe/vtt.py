@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import re
 from typing import List, Optional
@@ -14,6 +15,11 @@ _CUE_RE = re.compile(
 # Inline timestamp / karaoke tags YouTube auto-subs embed, e.g. "<00:00:01.520>" and
 # "<c>word</c>" colour tags. Stripped so the plain words remain.
 _TAG_RE = re.compile(r"<[^>]+>")
+# yt-dlp marks the video's own language track ``en-orig`` / ``zh-orig``. That is
+# yt-dlp's marker, not a BCP-47 subtag -- `is_translated_track` already knows this
+# (it is why ``en-orig`` counts as an original), but the value was still being
+# written into the stored ``language`` column verbatim.
+_ORIG_SUFFIX_RE = re.compile(r"-orig$", re.IGNORECASE)
 
 
 def _parse_ts(value: str) -> float:
@@ -30,17 +36,34 @@ def _parse_ts(value: str) -> float:
 
 
 def _clean_text(line: str) -> str:
-    return _TAG_RE.sub("", line).strip()
+    """Strip the tags, then unescape the entities -- in that order.
+
+    A YouTube cue carries both: real markup (``<c>``, ``<00:00:01.520>``) and HTML
+    entities (``&gt;&gt;`` for a speaker change, ``&#39;`` for an apostrophe, ``&amp;``).
+    Only the tags were being removed, so three of the six natively-subtitled
+    transcripts in the library open with a literal ``&gt;&gt;``.
+
+    Unescaping first would be wrong, not merely redundant: ``&lt;c&gt;`` would become
+    ``<c>`` and the tag stripper would then delete it *and* believe it had found
+    markup, silently eating text the caption author had deliberately escaped.
+    """
+    return html.unescape(_TAG_RE.sub("", line)).strip()
 
 
 def _lang_from_path(path: str) -> str:
-    """Best-effort language code from a yt-dlp subtitle filename (foo.en.vtt)."""
+    """Best-effort language code from a yt-dlp subtitle filename (foo.en.vtt).
+
+    The ``-orig`` marker is dropped here, at the one place that knows the value came
+    out of a filename. Leaving it in put two vocabularies in a single column: Whisper
+    writes ISO-639-1 (``en``), this path wrote ``en-orig`` for the same language, and
+    a ``GROUP BY language`` reads them as two different languages.
+    """
     base = os.path.basename(path)
     stem = base[:-4] if base.lower().endswith(".vtt") else base
     parts = stem.rsplit(".", 1)
     # Accept codes like "en", "zh", "zh-Hant", "pt-BR" (BCP-47-ish, up to ~10 chars).
     if len(parts) == 2 and 1 <= len(parts[1]) <= 10:
-        return parts[1]
+        return _ORIG_SUFFIX_RE.sub("", parts[1])
     return ""
 
 
