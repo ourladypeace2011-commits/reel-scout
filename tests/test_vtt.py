@@ -61,6 +61,23 @@ class TestLangFromPath:
         assert _lang_from_path("/x/yt_abc.zh-Hant.vtt") == "zh-Hant"
         assert _lang_from_path("/x/yt_abc.vtt") == ""
 
+    def test_ytdlp_orig_marker_does_not_reach_the_language_column(self) -> None:
+        """``en-orig`` is yt-dlp bookkeeping, not a language.
+
+        Three transcripts in the library carry ``language = 'en-orig'`` while 52
+        carry ``'en'`` for the same language -- the only difference is which path
+        wrote the row. Nothing broke loudly; a ``GROUP BY language`` just quietly
+        reported one more language than the corpus has.
+
+        Regions and scripts stay: ``zh-TW`` and ``pt-BR`` are real, more specific
+        answers, and dropping them would lose information to fix a different bug.
+        """
+        assert _lang_from_path("/x/yt_abc.en-orig.vtt") == "en"
+        assert _lang_from_path("/x/yt_abc.zh-orig.vtt") == "zh"
+        assert _lang_from_path("/x/yt_abc.en-ORIG.vtt") == "en"
+        assert _lang_from_path("/x/yt_abc.zh-TW.vtt") == "zh-TW"
+        assert _lang_from_path("/x/yt_abc.pt-BR.vtt") == "pt-BR"
+
 
 def _write(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
@@ -82,12 +99,49 @@ class TestParseVtt:
         # inline <...> tags stripped
         assert "<" not in r.text_full
 
+    def test_html_entities_are_unescaped(self, workdir) -> None:
+        """Captions arrive HTML-escaped; the parser was not undoing it.
+
+        ``&gt;&gt;`` is how YouTube marks a speaker change, so it lands at the very
+        start of the transcript -- the first thing a reader or an LLM sees. Three of
+        the six natively-subtitled transcripts in the library open with it.
+        """
+        p = os.path.join(workdir, "entities.en.vtt")
+        _write(p, ENTITY_SAMPLE)
+        r = parse_vtt(p)
+        assert r.text_full == ">> Both of my parents & I don't agree"
+
+    def test_escaped_markup_survives_the_tag_stripper(self, workdir) -> None:
+        """Order-of-operations guard, not a hypothetical.
+
+        Unescape before the tag stripper and a caption that escaped its angle
+        brackets on purpose becomes markup, gets deleted, and the text vanishes with
+        no error anywhere.
+        """
+        p = os.path.join(workdir, "escaped.en.vtt")
+        _write(p, ESCAPED_MARKUP_SAMPLE)
+        r = parse_vtt(p)
+        assert r.text_full == "use <div> for that"
+
     def test_empty_file(self, workdir) -> None:
         p = os.path.join(workdir, "empty.en.vtt")
         _write(p, "WEBVTT\n\n")
         r = parse_vtt(p)
         assert r.segments == []
         assert r.text_full == ""
+
+
+ENTITY_SAMPLE = """WEBVTT
+
+00:00:00.000 --> 00:00:02.000
+&gt;&gt; Both of my parents &amp; I don&#39;t agree
+"""
+
+ESCAPED_MARKUP_SAMPLE = """WEBVTT
+
+00:00:00.000 --> 00:00:02.000
+use &lt;div&gt; for that
+"""
 
 
 class TestFindSubtitle:
