@@ -1,6 +1,7 @@
 # Reel Scout — Roadmap
 
-> 最後校正：2026-07-15（對照實際 code 逐項驗證，非憑記憶）
+> 最後校正：**2026-09-01**（對照 code＋**實際 DB 內容**逐項驗證。這份檔上一次校正在 2026-07-21，之後漂了約六週：版號、schema、測試數全錯，而且 §4E 那條 🔴「證據層從沒在語料上跑過」**早就不成立了**——`shot_metrics` 現在 116 列，是本次逐項實查才發現的。⚠️ **這份檔自己示範了它命名過的那個病**：completion-blind drift 不只讓壞消息隱形，也讓**好消息**隱形了六週。詳見 §現況 與 §4E 回填段的 2026-09-01 更新）
+> 前次校正：2026-07-15（對照實際 code 逐項驗證，非憑記憶）
 > 2026-07-17 增補：crv 對標（§4E pacing/BPM 實測化 + §4F 燒錄字幕 OCR + 參考案例 crv）→ [`docs/crv-vs-reel-scout.md`](./crv-vs-reel-scout.md)
 > 2026-07-18 drift 修正：測試 162→177（實跑驗證）+ 已完成清單補 `inspect`（PR #29 遺漏回寫）
 > 2026-07-18 §4E 實作：evidence-based pacing（shot-table cuts/min + audio energy/BPM）落地，schema v7，測試 →200（含 codex+harness 雙審修正）
@@ -47,9 +48,23 @@ Phase 2.5████████████████████  ✅ 品�
 Phase 3  ████████████████████  ✅ Batch Intelligence — browse ✅、compare ✅、3C ✅、3D stats ✅、patterns ✅、instaloader fallback ✅（channel 表/batch-resume 為刻意延後的大重構）
 Phase 4  ████████████████████  ✅ Content Strategy Engine — 4A research ✅、4B inspire ✅、4C MCP 擴充 ✅、4D track ✅、4E 評分證據化 ✅、4F L3.5 OCR ✅
 Phase 5  ████████████████████  ✅ Tool Hygiene — LICENSE/README/CHANGELOG ✅、analyze-local ✅、yt-dlp 健壯性 ✅、CI ✅、config check ✅、**PyPI 上架 ✅（v1.2.0，Trusted Publishing 零 token）**
+Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
+Phase 6  ░░░░░░░░░░░░░░░░░░░░  📋 Shot-level 反解（per-shot 表 → 景別/運鏡 → 分鏡交付格式）— 提議中，見 §Phase 6
 ```
 
-**目前版本**：v1.2.0 ｜ **測試**：324 passing ｜ **DB schema**：v9
+**目前版本**：**v1.3.1** ｜ **測試**：**879 passing**（2026-09-01 實跑）｜ **DB schema**：**v13**
+
+> 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
+
+### 語料現況（2026-09-01 實查 `data/reel_scout.db`）
+
+```
+videos 117 | analyses 117 | scores 115 | keyframes 2872
+shot_metrics 116 | ocr_captions 113 支           ← §4E / §4F 的產物，兩張表都活著
+有分數但無實測證據：1 支
+```
+
+**這推翻了 §4E 回填段那條 🔴。** 2026-07-20 記的「`shot_metrics` / `ocr_captions` 實際 0 列」在 2026-09-01 已不成立——證據層 116/117 覆蓋，`_measured_block()` 現在對幾乎每一支都吐得出東西。**但 v1.3 里程碑的第二個條件仍未達成**（`stats` 仍不報證據覆蓋率，見下）。
 
 ### 已完成功能清單（2026-07-15 驗證）
 
@@ -73,7 +88,23 @@ Phase 5  ████████████████████  ✅ Tool 
 - **vulture.s 外殼** (2026-07-20): `theme.py` 承品牌 SSOT token；品牌字型隨套件出貨（拉丁 78 KB／server 走 `/font/`、匯出走 base64），CJK 按內容動態 subset
 - **學生包** (2026-07-20): `export --format bundle` — 一支 reel 一個自包含 HTML（影片/keyframe/波形/字型全內嵌）+ index；`--max-mb` 擋過大長片。實測整頁僅 1 個網路請求
 - **Viewer** (v1.1.0): 唯讀檢視器三面——`export --format html`（自包含單檔、零安裝 take-home）+ `reel-scout view`（本機 server、live demo）+ `reel-scout inspect`（互動 single-clip：transcript↔keyframe 時間同步、可點時間軸跳播，port 自 arkiv，PR #29）；顯示拆解結構+keyframe+分數+逐字，無動作按鈕
-- **DB**: SQLite WAL + batch resume + schema migration（→ v9）
+- **DB**: SQLite WAL + batch resume + schema migration（→ **v13**）
+
+### 2026-07-21 之後新增的能力（本次補登，上一版完全沒有這段）
+
+v1.3.0 發布後到 2026-08-26 之間有 **35 顆 commit** 進 master，其中大半是「跑得動但結果悄悄不對」那一類的修復。**這批沒有一條回寫過 roadmap**，所以列在這裡：
+
+- **`export --format skeleton`**（PR #46）：beat 結構（逐句時間碼）＋實測節奏（cuts/min、avg shot、BPM/energy）＋說話者輪替數，作為 **reel-scout → smart-edit 的交接資料格式**。檔頭寫明「介面是資料格式，不是函式呼叫；兩邊都不 import 對方」——**這是本專案第一個對外交接格式，也是 §Phase 6 要沿用的先例**
+- **`export --format json` 保留逐句時間碼**（#47）
+- **`mark`**（#70）：一支片的時間軸上可掛標記，inspector 邊看邊對照
+- **keyframe run 身分化 + 批次失敗可見**（#68）：抽楨變成有 `run_id` 的一次「執行」；另修**關鍵楨取樣塌在片頭**（排序後才截斷，長片只看得到開頭）
+- **`batch` 逾時**（#69）：每一步有時限、整批也有
+- **無效片判定**（#77）：跑不成的片不再以 0.0 分進語料；`stats`/`patterns` 排除並報排除數；`db check-invalid [--apply]` 稽核既有庫
+- **`stats` 分數依 `model_used` 分組**（#75）：兩把尺不再平均成一個數
+- **逐字稿語言兩修**（#73/#74）：繁體講者不再回簡體；不再挑到 YouTube 的機器翻譯軌
+- **codec 守門**（#60/#78/#79）：停止抓 AV1／IG 與 TikTok 補上編碼條件——「分析得很好，然後放不出來」
+- **whisper-guard 反幻覺**（#45）、**speaker-align 抽成套件**（#49）
+- **BPM near-miss 可見**（本輪）：被門檻否決但接近的 tempo 不再靜默消失，印出候選值與比值
 
 ---
 
@@ -166,9 +197,11 @@ shot_metrics 0 | ocr_captions 0        ← §4E / §4F 的產物，兩張表都�
 
 也就是說：**§4E 想解的問題原封不動還在。** 現有 12 筆分數的 `pacing` 仍然百分之百是 LLM 憑感覺給的，跟 §4E 落地前沒有差別——差別只在「現在有能力算，但沒算」。roadmap 標 ✅ 而語料為空，是典型的 completion-blind drift：驗收看的是測試綠，不是資料有沒有真的長出來。
 
-- [ ] 🔴 **對既有語料補跑 §4E/§4F 抽取**，讓 `shot_metrics` / `ocr_captions` 真的有列。要先確認的兩件事：(a) 補跑是否需要原始影片檔仍在（`data/videos/`）——若已清掉，得先決定是重抓還是只對還在的補；(b) 補跑後**既有 12 筆分數要不要重評**——重評會讓分數跨版本不可比（§4E 落地時已知的問題，這次是第二次觸發）。
-- [ ] 🔴 **加一個「證據層是否為空」的可見性**：`stats` 或 `config check` 應該要能告訴你「N 支影片有分數、其中 M 支有實測證據」。這次是靠人工 `SELECT COUNT(*)` 才發現，等於這個洞可以無限期隱形——**能力存在但沒被使用，跟能力不存在，對使用者是同一件事**。
+- [x] 🔴 **對既有語料補跑 §4E/§4F 抽取** ✅ **2026-09-01 實查確認已達成**（非單一補跑動作，是後續 40 顆 commit 期間語料自然長到 117 支的結果）：`shot_metrics` **116 列**、`ocr_captions` **113 支**、`scores` 115 筆，有分數卻無實測證據的只剩 **1 支**。`_measured_block()` 現在對幾乎每一支都吐得出東西——§4E 想解的問題**實質已解**。
+- [ ] 🔴 **加一個「證據層是否為空」的可見性** —— **仍未做（2026-09-01 實驗證）**：`reel-scout stats` 實跑輸出只有 tag 分佈與分數聚合，`grep shot_metrics reel_scout/stats.py` **零命中**。
+  > ⚠️ **這條的代價這次是反過來付的**。原本的理由是「洞可以無限期隱形」，結果隱形的是**修好了**這件事：證據層在六週前就補齊了，而 roadmap 上那個 🔴 一直掛著，因為**沒有任何介面會講這件事**，只有人工 `SELECT COUNT(*)` 才看得到。原句「能力存在但沒被使用，跟能力不存在，對使用者是同一件事」要補上對稱的另一半：**能力已經在用但沒有介面說，跟沒在用也是同一件事。**
 - [ ] （順帶）`pipeline` 是否該在 `shot_metrics` 寫入失敗時出聲，而不是靜默留白。目前無從得知是「沒跑」還是「跑了但失敗」。
+  > 2026-09-01 註：音訊那半已有部分覆蓋——`Audio rhythm skipped: %s` 會印，本輪再加上 BPM near-miss 的候選值輸出。**剪點那半仍然靜默**：`compute_shot_metrics` 回 `None` 時整段跳過、不出聲。
 
 > 這條的來源是 JapowDB 拆解（`hevin-ai-os` case-study 2026-07-20）。該站把評分門檻交給讀者調，逼出一個對照問題：**我們的分數底下有沒有東西可以被檢驗？** 答案是有設計、沒資料。PR #35 的權重滑桿讓「怎麼合成」變透明了，但被合成的四個數字本身，目前仍無客觀依據——先補證據層，滑桿才不只是漂亮。
 
@@ -231,6 +264,74 @@ shot_metrics 0 | ocr_captions 0        ← §4E / §4F 的產物，兩張表都�
 
 ---
 
+## Phase 6 — Shot-level 反解（提議中，2026-09-01 開）
+
+**起點**：用 reel-scout 拆了三支 MV（4–5.5 分鐘的音樂錄影帶，非短影音）之後，跟一套**分鏡／PPM 製作工具**（STB，同作者的 macOS App，案子的唯一真相是一份 `project.json`）對照，發現兩邊是**同一個資料結構的兩個時間方向**：
+
+```
+分鏡工具的 cut = 計畫（要拍什麼）      ← 正向
+reel-scout 的 shot = 紀錄（他拍了什麼） ← 反向
+```
+
+這正是 README/課程一直在講的「拆爆款 → 抽 SOP → 倒推自己的分鏡」閉環——**目前那個閉環只有教材，沒有工具**。
+
+### 🔴 6A. `shots` 表：剪點時間碼現在被算出來然後丟掉
+
+`reel_scout/shots.py` 的 `parse_cut_count()`：
+
+```python
+return len(_TS_PATTERN.findall(stderr))   # ← pts_time 全解出來了，只取 len()
+```
+
+**每一刀的時間碼每次 analyze 都算一次，然後整串扔掉，只留一個數字進 `shot_metrics`。**
+
+⚠️ 這不是新範圍，是 **§4E 沒做完的那一半**。§4E 的啟發來源自己寫著「crv Pro 的 `--motion` 產出 shot table（**per-shot duration** / cuts per minute / 節奏變化）」——當時偷了 cuts/min，**per-shot 那半沒偷**。
+
+- [ ] 保留剪點時間碼 → 新 `shots` 表（index / start / end / dur）。**「一顆鏡頭」第一次成為可定址的物件**——沒有這個單位，下面每一項都無處可掛
+- [ ] `keyframes` 綁 `shot_id` → 每顆鏡頭有代表幀
+- [ ] 逐字稿 segment 與 `ocr_captions` 依時間區間投影到 shot → **旁白與字卡自動分流到各自的鏡頭**（兩條原始訊號都已存在，這步是接線不是新演算法）
+
+### 6B. 受限詞彙：景別
+
+VLM 現在用散文說「close-up shot」，**沒有正規化欄位**。而詞彙表已經寫在自己 repo 裡了——`prompts/storyboard-visualize.md` 的 ECU / CU / MCU / MS / MLS / LS / ELS，只是它現在服務的是**正向**（鏡頭表 → 生圖 prompt）。反向要的是同一套詞當**受限輸出**。
+
+- [ ] 每顆 shot 一個景別標籤，值域來自既有 prompt pack，不另造一套
+
+### 6C. 運鏡（固定／手持／搖／跟／推拉）
+
+**目前完全沒有。** `vision/keyframe.py` 的 `motion` strategy 是 mpdecimate **選幀**，不是運鏡判讀。
+
+> 📌 **這一項在 §參考案例 的「刻意不偷」清單上並不存在**。那張清單列的是：情緒／mood／ai-report、變速鑑識、$19 漏斗。**「鏡頭運動」從未被納入、也從未被否決**，它是懸空的——而它通得過本專案自己那條篩子（「只偷讓判讀更可實測的部分」），因為幀間位移是可量的，不是 model-dependent 的主觀輸出。
+
+- [ ] 在每顆 shot 內解降尺寸灰階幀，純 numpy 算相鄰幀位移與尺度變化 → 近零＝固定／高頻低振幅＝手持／單向持續位移＝搖或跟／尺度單調變化＝推拉
+  > ⚠️ 依賴邊界（2026-09-01 實查本機 ffmpeg）：**沒有 `vidstabdetect`**（libvidstab 未編入），有 `mestimate` 但輸出是視覺疊層不是資料檔。所以走 numpy，形狀比照 `audio/rhythm.py`：純 numpy、best-effort、測不準回 None
+- [ ] 連續鏡群組：相鄰 shot 的 VLM 描述 + 色彩直方圖相似度做第一版
+
+### 6D. 交付格式：`export --format <storyboard>`
+
+沿用 `export --format skeleton` 已經立好的先例（資料格式交接，兩邊都不 import 對方）。目標工具讀到外部改寫的 `project.json` 會在 2 秒內自動重載——等於匯出即刷新。
+
+- [ ] 把一支已分析的片輸出成該工具吃得下的分鏡案
+
+**⬛ 刻意不做**：器材、焦段、感光元件格式（`ff`/`s35`）這些欄位**留空**。從成片回推焦距是估計問題，而那些欄位的填寫者是現場的攝影師。猜一個數字填進去，它會混進客戶看的 PPM 而沒有人知道那是猜的。`props` 可以用 `objects_json` 產**候選清單**，但要標成建議。
+
+### 🔴 6E. 紅線：來源標記
+
+reel-scout 的 shot 是**別人的片**；分鏡工具的 `project.json` 是**要送到客戶面前的 PPM**。這座橋一通，「參考」與「模板」之間就只剩一次存檔。
+
+- [ ] 匯出時每顆 cut 強制帶來源 URL 與時間碼、案名帶 `REF:` 前綴——讓一份拆來的分鏡表**不可能安靜地變成交付物**
+
+### 排序（刻意的）
+
+**6A 不是第一步。** 這個 repo 有紀錄的頭號失效模式是 completion-blind drift（§4E 的 0 列一次、0.0 分那列一次），而 Phase 6 會新增第三個可以安靜空掉的抽取層。所以順序是：
+
+1. `stats` 報證據覆蓋率（v1.3 欠的 (b)）
+2. `db check-invalid --apply` 跑過既有語料
+3. 然後才開 `shots` 表 —— **這時它一落地就有人在量它有沒有真的長出資料**
+4. 6B → 6C → 6D/6E
+
+---
+
 ## 參考案例（study cases）
 
 ### claude-real-video / crv（2026-07-17 對標）
@@ -238,6 +339,8 @@ shot_metrics 0 | ocr_captions 0        ← §4E / §4F 的產物，兩張表都�
 `HUANGCHIHHUNGLeo/claude-real-video` — 「讓 LLM 看得見影片」的擷取工具（Python/MIT，2.5 週衝 1,699★），另有閉源付費 **crv Pro（$19 一次性）**加鏡頭運動/情緒/OCR/變速鑑識。**不同層**：crv（含 Pro）是感知＋測量層（把影片攤平給 LLM 看、量化「怎麼拍的」），Reel Scout 是判讀層（帶 rubric 打分＋反解會不會紅＋競品語料）。重疊只在 ingest。
 
 **完整對照** → [`docs/crv-vs-reel-scout.md`](./crv-vs-reel-scout.md)。
+
+> 📌 **2026-09-01 修正這段的「不同層」**：§Phase 6C（運鏡）一旦做下去，reel-scout 就**跨進了 crv 那個感知／測量層**，「重疊只在 ingest」不再成立。這不是改變立場——原則仍是「只偷可實測的部分」，運鏡通得過那條篩子——但**這句話該停止當成兩邊互不相干的證據**。真正沒被偷的仍然是：情緒／mood／ai-report、變速鑑識、$19 漏斗。
 
 **對本專案的關聯**：可偷的實測強化已開兩條 → §4E（pacing/BPM 實測化）、§4F（燒錄字幕 OCR 補 transcript）。原則是**只偷讓判讀更可實測的部分**，crv 另一半 model-dependent 主觀輸出（情緒/mood/ai-report）、變速鑑識、病毒開源→$19 漏斗**刻意不偷**（前者放大既有軟肋、後者違反「工具不是產品」定位，只當課程 case study 存檔）。
 
@@ -275,4 +378,6 @@ shot_metrics 0 | ocr_captions 0        ← §4E / §4F 的產物，兩張表都�
 | **v0.5** | ~~4A（競品研究報告）~~ ✅ 2026-07-17（達成，隨 v1.0 一次發布） |
 | **v1.0** | ~~5A + 5B 完成（PyPI build 就緒 + CI 綠 + yt-dlp 健康檢查 + config check）~~ ✅ 2026-07-17（PyPI 上架待人工 token） |
 | **v1.2** | ~~§4E 評分證據化 + §4F L3.5 OCR + Wave 3（3B patterns / 3A instaloader / 4B inspire / 4D track / 4C MCP 8-tools / 5A+5C docs）~~ ✅ 2026-07-19（PR #31/#32/#33，schema v9，228 tests；⚠️ pacing 評分行為改變，跨版本分數不可比）<br>🔴 **2026-07-20 更正：§4E「達成」僅指 code，語料上 `shot_metrics` 為 0 列、從沒真的跑過** → 證據層實質未生效，見 §4E 回填段 |
-| **v1.3（提議）** | 🔴 §4E 證據層**補跑到語料上**（不是再寫 code，是讓既有 code 真的產出資料）+ 證據為空的可見性（`stats` 要能講「N 支有分數、M 支有證據」）。<br>條件：`shot_metrics` 列數 > 0 且 `stats` 能報出證據覆蓋率。**這條沒過之前，任何評分 UI 精修都是在裝飾沒有地基的數字。** |
+| **v1.3** | ~~權重即時重算 + 中英介面切換~~ ✅ 2026-07-21（PR #35，v1.3.0 發布）|
+| **v1.3（原提議的證據層條件）** | 條件有兩個，**2026-09-01 實查：一過一沒過**。<br>✅ (a) `shot_metrics` 列數 > 0 —— **116 列**，遠超條件。<br>🔴 (b) `stats` 能報出證據覆蓋率 —— **仍未做**，`stats.py` 零命中。<br>⚠️ **版號已經走過去了（現為 v1.3.1）而 (b) 沒跟上**——里程碑當條件用、版號當進度用，兩者脫鉤時就會這樣。原句「這條沒過之前，任何評分 UI 精修都是在裝飾沒有地基的數字」仍然成立，只是現在地基有了、**儀表板還沒有**。 |
+| **v1.4（提議）** | **證據可見性 + shot-level 地基**，順序是刻意的（見 §Phase 6）：<br>① `stats` 報證據覆蓋率（補完 v1.3 的 (b)）<br>② `db check-invalid --apply` 跑過既有語料（Unreleased 已有 code，庫裡那列 0.0 還在）<br>③ `shots` 表：保留剪點時間碼，讓「一顆鏡頭」第一次成為可定址的物件<br>條件：`stats` 能講出證據覆蓋率**且** `shots` 列數 > 0。**①② 排在 ③ 前面不是禮貌，是因為 ③ 會新增第三個可以安靜空掉的抽取層，而這個 repo 已經在同一個坑裡跌過兩次。** |
