@@ -15,6 +15,22 @@ mean that can describe no video in the corpus. The pooled block is still
 reported — it is the long-standing output shape and dropping it would break
 readers — but when more than one source is present it is labelled as pooled and
 `mixed_score_sources` is set, so nobody reads it as a single scale.
+
+`evidence_coverage` answers the question roadmap §4E left open: of the videos
+carrying a craft score, how many have a `shot_metrics` row underneath it. With
+one, the merger folds measurements into `full_json.measured` and the scorer
+prompt prefers them for `pacing`; without one, `pacing` is the model reading the
+vibe off the analysis text — the exact model-dependent guess §4E existed to
+remove. The two print the same-looking number, so the difference is invisible at
+the point of use.
+
+That gap cost six weeks in both directions. §4E was marked done in code while
+`shot_metrics` held zero rows, and nothing said so; then the corpus filled to
+116/117 and nothing said that either, so the roadmap carried a stale 🔴 until
+somebody ran `SELECT COUNT(*)` by hand. **A capability in use that no surface
+reports is indistinguishable from one that is not in use** — the same way round
+as the original note, and the reason this block reports counts rather than a
+bare percentage: 100% of two videos and 100% of two hundred are different claims.
 """
 from __future__ import annotations
 
@@ -106,6 +122,47 @@ def _score_groups(
     return census, by_model
 
 
+def _evidence_coverage(
+    conn: db.sqlite3.Connection, where: str, params: List[Any]
+) -> Dict[str, Any]:
+    """How many scored videos actually have measurements under the score.
+
+    `pacing` is only evidence-based when `shot_metrics` exists for that video:
+    the merger folds it into `full_json.measured` and the scorer prompt prefers
+    it. With no row, the scorer falls back to reading the vibe off the analysis
+    text — the exact model-dependent guess §4E existed to remove. Both cases
+    print an identical-looking number, so the difference is invisible at the
+    point of use; this is the surface that names it.
+
+    Reported as a count, never as a bare percentage: 100% of two videos and
+    100% of two hundred are not the same claim.
+    """
+    scored = conn.execute(
+        "SELECT COUNT(*) FROM scores s JOIN videos v ON s.video_id = v.id "
+        "WHERE 1=1" + where + _NOT_INVALID, params
+    ).fetchone()[0]
+    scored_with_measured = conn.execute(
+        "SELECT COUNT(*) FROM scores s JOIN videos v ON s.video_id = v.id "
+        "WHERE EXISTS (SELECT 1 FROM shot_metrics m WHERE m.video_id = s.video_id)"
+        + where + _NOT_INVALID, params
+    ).fetchone()[0]
+    measured_videos = conn.execute(
+        "SELECT COUNT(*) FROM shot_metrics m JOIN videos v ON m.video_id = v.id "
+        "WHERE 1=1" + where + _NOT_INVALID, params
+    ).fetchone()[0]
+    ocr_videos = conn.execute(
+        "SELECT COUNT(DISTINCT o.video_id) FROM ocr_captions o "
+        "JOIN videos v ON o.video_id = v.id WHERE 1=1" + where + _NOT_INVALID, params
+    ).fetchone()[0]
+    return {
+        "scored": scored,
+        "scored_with_measured": scored_with_measured,
+        "scored_without_measured": scored - scored_with_measured,
+        "measured_videos": measured_videos,
+        "on_screen_text_videos": ocr_videos,
+    }
+
+
 def compute_stats(conn: db.sqlite3.Connection, channel: Optional[str] = None) -> Dict[str, Any]:
     where, params = _channel_clause(channel)
 
@@ -158,6 +215,7 @@ def compute_stats(conn: db.sqlite3.Connection, channel: Optional[str] = None) ->
         "score_sources": score_sources,
         "score_aggregates_by_model": score_aggregates_by_model,
         "mixed_score_sources": len(score_sources) > 1,
+        "evidence_coverage": _evidence_coverage(conn, where, params),
     }
 
 
@@ -184,6 +242,21 @@ def format_stats(stats: Dict[str, Any]) -> str:
         lines.append(
             "Excluded: %d invalid (media never processed; see "
             "`reel-scout db check-invalid`)" % stats["excluded_invalid"])
+
+    ev = stats.get("evidence_coverage") or {}
+    if ev.get("scored"):
+        lines.append("\n-- Evidence coverage --")
+        lines.append("%-20s %5d" % ("scored", ev["scored"]))
+        lines.append("%-20s %5d  (shot_metrics: cuts/min, avg shot, BPM/energy)"
+                     % ("with measured", ev["scored_with_measured"]))
+        if ev["scored_without_measured"]:
+            lines.append("%-20s %5d  <- pacing on these is model judgement, not measurement"
+                         % ("without measured", ev["scored_without_measured"]))
+        lines.append("%-20s %5d  videos" % ("on-screen text L3.5",
+                                            ev["on_screen_text_videos"]))
+    elif ev:
+        lines.append("\n-- Evidence coverage --")
+        lines.append("no scored videos in scope")
 
     lines.append("\n-- Tag distributions --")
     for col, dist in stats["tag_distributions"].items():
@@ -247,6 +320,10 @@ def to_csv_rows(stats: Dict[str, Any]) -> List[List[Any]]:
         for col, agg in agg_by_col.items():
             for key in ("avg", "min", "max", "count"):
                 rows.append(["score_by_model", src, "%s.%s" % (col, key), agg[key]])
+    # Emitted even when every count is zero: "no evidence" and "this CSV predates
+    # evidence reporting" must not look the same to a reader.
+    for key, val in sorted((stats.get("evidence_coverage") or {}).items()):
+        rows.append(["evidence", "coverage", key, val])
     return rows
 
 
