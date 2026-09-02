@@ -160,6 +160,20 @@ def main(argv: List[str] = None) -> None:
                            help="Don't auto-open the browser")
 
     # --- export ---
+    p_tr = sub.add_parser(
+        "translate", help="Traditional Chinese beside the free text (never replacing it)")
+    p_tr.add_argument("video", help="Video id or unique prefix")
+    p_tr.add_argument("--model", default="qwen2.5:14b",
+                      help="Text model to ask (ollama). Stamped on every row.")
+    p_tr.add_argument("--base-url", default=None, help="ollama base URL")
+    p_tr.add_argument("--kinds", default=None,
+                      help="Comma-separated subset: description,transcript_segment,"
+                           "summary,timeline,reasoning")
+    p_tr.add_argument("--limit", type=int, default=0, help="Stop after N passages")
+    p_tr.add_argument("--keep-stale", action="store_true",
+                      help="Leave translations whose source text has changed. "
+                           "Off by default: a stale one looks exactly like a current one.")
+
     p_sbdiff = sub.add_parser(
         "storyboard-diff",
         help="Compare an edited storyboard project against the teardown it came from")
@@ -421,6 +435,7 @@ def main(argv: List[str] = None) -> None:
         "mark": _cmd_mark,
         "shot-size": _cmd_shot_size,
         "storyboard-diff": _cmd_storyboard_diff,
+        "translate": _cmd_translate,
         "research": _cmd_research,
         "db": _cmd_db,
         "config": _cmd_config,
@@ -709,6 +724,33 @@ def _clip(text: str, width: int) -> str:
     whole line, which is how a reader ends up quoting half a sentence."""
     text = " ".join(text.split())
     return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def _cmd_translate(args) -> None:
+    from . import db, translate
+    from .compare import resolve_ref
+
+    conn = db.init_db()
+    video_id, matches = resolve_ref(conn, args.video)
+    if video_id is None:
+        print("Video not found: %s" % args.video)
+        if matches:
+            print("  did you mean: %s" % ", ".join(m[:12] for m in matches[:5]))
+        conn.close()
+        return
+    kinds = [k.strip() for k in args.kinds.split(",")] if args.kinds else None
+    tally = translate.translate_video(
+        conn, video_id, args.model, base_url=args.base_url, kinds=kinds,
+        limit=args.limit or None, refresh_stale=not args.keep_stale)
+    conn.close()
+    print("translations: %d new, %d refreshed, %d already current, %d failed "
+          "(of %d translatable passage(s))"
+          % (tally["translated"], tally["refreshed"], tally["skipped_existing"],
+             tally["failed"], tally["candidates"]))
+    if tally["refreshed"]:
+        # Worth naming: the source text moved under a translation that was
+        # already there, and nothing else would have said so.
+        print("  refreshed = the original had changed since it was translated")
 
 
 def _cmd_storyboard_diff(args) -> None:
