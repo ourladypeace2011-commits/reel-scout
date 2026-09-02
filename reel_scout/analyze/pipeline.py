@@ -538,13 +538,18 @@ def _process_single(
                 # ffmpeg/numpy are unavailable.
                 try:
                     from ..audio.extract import extract_wav
-                    from ..audio.rhythm import compute_rhythm
+                    from ..audio.rhythm import compute_rhythm, near_miss_note
                     import tempfile
                     wav_path = tempfile.mktemp(suffix=".wav")
                     try:
                         extract_wav(file_path, wav_path)
                         rhythm = compute_rhythm(wav_path)
                         bpm, energy = rhythm.get("bpm"), rhythm.get("energy")
+                        # A rejected-but-close tempo peak used to vanish into a
+                        # silent None, indistinguishable from beatless audio.
+                        note = near_miss_note(rhythm)
+                        if note:
+                            print("  %s" % note)
                     finally:
                         import os as _os3
                         if _os3.path.exists(wav_path):
