@@ -294,9 +294,17 @@ def _render_structure(view: Dict[str, Any]) -> str:
         ("CTA", hook.get("cta_type")),
         ("CTA text", hook.get("cta_text")),
     ]
-    # Only the row LABEL is translatable; the value is model output and stays.
-    cells = ['<div class="mk" data-i18n="row.%s">%s</div><div class="mv">%s</div>'
-             % (_e(k), _e(k), _e(v)) for k, v in rows if v]
+    # The row label is always translatable. The value is too when it comes from
+    # a closed vocabulary; `value_key` returns None for free text (a hook line,
+    # a CTA phrase), which then renders raw in both languages.
+    cells = []
+    for k, v in rows:
+        if not v:
+            continue
+        vk = i18n.value_key(v)
+        mv = ('<div class="mv" data-i18n="%s">%s</div>' % (vk, _e(v))) if vk \
+            else '<div class="mv">%s</div>' % _e(v)
+        cells.append('<div class="mk" data-i18n="row.%s">%s</div>%s' % (_e(k), _e(k), mv))
     if not cells:
         return ""
     return ('<section class="block"><div class="eyebrow" data-i18n="decoded">Decoded structure</div>'
