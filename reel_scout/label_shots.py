@@ -71,15 +71,41 @@ _NUM_PREDICT = 12
 SKIP_FORMATS = ("talking_head",)
 
 
-def stale_prompt(row: Any) -> bool:
-    """True when this label came from a different prompt than the current one.
+#: The single statement of "this label did not come from the current prompt".
+#: Callers must alias `shot_labels` as `l`.
+#:
+#: 🔴 **One judge, not three.** The first version of this had the rule written
+#: as a Python predicate in this module, as SQL in `health.py`, and again in the
+#: re-run script outside the repo — and the Python one had no production caller
+#: at all, so it was tested code that judged nothing. Three copies of a rule
+#: agree right up until the day one of them is edited, and the disagreement
+#: would surface as health saying "0 stale" while the re-run kept finding work.
+STALE_PROMPT_SQL = ("l.kind = 'shot_size' AND l.source = ? "
+                    "AND COALESCE(l.prompt_hash, '') != ?")
 
-    NULL counts as stale: rows written before v17 have no fingerprint, and
+
+def stale_prompt_params() -> tuple:
+    """The bindings for :data:`STALE_PROMPT_SQL`, in order.
+
+    NULL counts as stale: rows written before v17 carry no fingerprint, and
     "unknown provenance" is not the same claim as "current". The distribution
     moved ten-to-one when the prompt changed, so a label whose prompt cannot be
     established is not comparable to one whose can.
     """
-    return (row["prompt_hash"] or "") != prompt_fingerprint()
+    return (SOURCE_VLM, prompt_fingerprint())
+
+
+def stale_videos(conn) -> List[str]:
+    """Clips holding at least one label from a superseded prompt, id order.
+
+    Re-derived on every call rather than collected once: a caller that snapshots
+    the list up front cannot tell a clip that finished from a clip that failed —
+    both simply stop appearing in its loop.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT l.video_id FROM shot_labels l WHERE " +
+        STALE_PROMPT_SQL + " ORDER BY l.video_id", stale_prompt_params())
+    return [r["video_id"] for r in rows]
 
 
 def skip_reason(conn, video_id: str) -> Optional[str]:
