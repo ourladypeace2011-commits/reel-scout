@@ -19,9 +19,25 @@ per shot): 39 frames in 2.4 minutes ≈ 3.7 s/frame. The whole 2,872-frame libra
 is therefore ≈ 3 hours, not the 9.5 estimated before measuring — the constrained
 answer caps output at a dozen tokens, where a full description does not.
 
-**Known weakness, measured on the same run**: a title card or a graphic gets a
-subject-based code instead of `UNKNOWN`. One of three spot-checked frames was a
-title card labelled `LS`. Treat `UNKNOWN` as under-reported.
+**Known weaknesses, both measured rather than suspected:**
+
+* A title card or a graphic gets a subject-based code instead of `UNKNOWN`. One
+  of three spot-checked frames was a title card labelled `LS`. Treat `UNKNOWN`
+  as **under-reported**.
+* `ECU` is **over-reported**. Across the whole library (825 labels, 2026-09-02)
+  it came back as the single most common size at 35% — which no mixed corpus of
+  tutorials, montages and vlogs actually looks like. Two randomly sampled `ECU`
+  frames were opened: one was a genuine extreme close-up (two faces cropped
+  forehead-to-chin), the other was an astronaut framed from the waist up, which
+  is a medium shot. **1 of 2 wrong.**
+  Part of the cause is the material rather than the model: this library is
+  mostly 9:16 short-form, and a stacked split-screen frame has no single answer
+  to "how much of the frame does the subject fill". `ELS` came back zero times
+  and `MLS` once, so in practice the model uses about half the vocabulary.
+
+⇒ **Use these labels as a signal, never as ground truth.** A storyboard cut
+that carries one is a starting point for the person editing it, which is what
+the export's `REF:` marking already assumes.
 """
 from __future__ import annotations
 
