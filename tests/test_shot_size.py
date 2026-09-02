@@ -90,3 +90,14 @@ def test_describe_is_readable_and_survives_an_unknown_code():
 def test_normalize_is_whitespace_and_case_insensitive():
     assert normalize("  MEDIUM   SHOT  ") == "MS"
     assert normalize("medium_shot") == "MS"
+
+
+def test_parse_answer_does_not_dig_a_code_out_of_a_sentence():
+    # A model that answers "the focus is accurate" has not followed the
+    # instruction. Salvaging the CU hiding inside "accurate" would both invent a
+    # label and hide how often the constraint is being ignored — which is the
+    # number worth watching when the model changes.
+    from reel_scout.shot_size import parse_answer as pa
+    assert pa("the focus is accurate") is None
+    assert pa("I think this is a medium shot of two people") is None
+    assert pa("Sorry, I cannot classify this image.") is None

@@ -49,12 +49,12 @@ Phase 3  ████████████████████  ✅ Batch
 Phase 4  ████████████████████  ✅ Content Strategy Engine — 4A research ✅、4B inspire ✅、4C MCP 擴充 ✅、4D track ✅、4E 評分證據化 ✅、4F L3.5 OCR ✅
 Phase 5  ████████████████████  ✅ Tool Hygiene — LICENSE/README/CHANGELOG ✅、analyze-local ✅、yt-dlp 健壯性 ✅、CI ✅、config check ✅、**PyPI 上架 ✅（v1.2.0，Trusted Publishing 零 token）**
 Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
-Phase 6  ████████████████░░░░  🔨 Shot-level 反解 — **6A/6D/6E 完成**、6B 詞彙完成待來源拍板、**6C 實測不可行已封存**
+Phase 6  ██████████████████░░  ✅ Shot-level 反解 — **6A/6B/6D/6E 完成**；**6C 實測不可行、已封存並寫明原因**
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**963 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v14**
+**目前版本**：**v1.3.1** ｜ **測試**：**976 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v15**
 
-> 基準寫清楚免得下一個人重數：`master` 948 ＋ 本支 15 ＝ **963**。schema **v14**（`shots` 表）。
+> 基準寫清楚免得下一個人重數：`master` 963 ＋ 本支 13 ＝ **976**。schema **v15**（`shots` ＋ `shot_labels`）。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 
@@ -328,7 +328,14 @@ VLM 現在用散文說「close-up shot」，**沒有正規化欄位**。而詞�
   - `normalize()` **兩種情況一律回 None**：句子沒提到取景（多數如此）、或一句裡出現兩種不同景別（「a close-up of a hand against a wide shot backdrop」有真正的答案，但那個答案不在這句話裡，取第一個命中會長得跟「知道」一模一樣）
   - **鏡頭語言不是景別**：`wide-angle lens` 講的是光學，廣角鏡天天在拍特寫。硬映射會把一個有信心的錯值放進一個本來要拿來信任的欄位
   - 兩字碼只以整詞比對 —— 否則 `cu` 會在 `curtain` / `document` / `focus` 裡命中
-- [ ] 🔴 **標籤的來源還沒決定，而離線抽取這條路已經被資料否掉了**（2026-09-02 實測）：拿 `normalize()` 掃既有 **2,828 筆** VLM 描述，只有 **17.3% 抽得出景別**，而且 **488 筆裡有 477 筆是 CU**。那不是真實的景別分布，是 VLM 把 close-up 當通用形容詞的用詞習慣。→ **離線抽取只能當 fallback，不能當主要來源。** 主要來源要嘛讓 VLM 從固定清單裡選（重跑 2,872 楨，約 9.5 GPU 小時，且是 model-dependent）、要嘛走既有的 `ingest` agent 路徑由外部供給。**兩條都要把來源與模型戳記進去**（比照 `scores.model_used` 的教訓），未拍板
+- [x] ✅ **2026-09-02**：標籤的來源做成兩條路，**跑不跑由人決定，工具不預設燒 GPU**。新 `shot-size` 指令：預設對每顆鏡頭的代表幀問本機 VLM（受限輸出），或用 `--from-json` 由外部供給（agent／人工），走的是 `ingest` 已有的 L1 形狀。
+  - **schema v15 新增 `shot_labels`，而標籤掛在時間點上、不掛在 `shots.id` 上** —— `save_shots` 是 replace，掛在 shot id 上的標籤會跟著那一列被刪掉、而且是靜默的。這個形狀 v13 的 `marks` 已經定過了：「七秒進去仍然是七秒進去」
+  - **每一列戳 `source` 與 `model`**，唯一鍵含 `source` → VLM 判的、外部供的、人手改的**三者並存不互相覆蓋**。理由是 `scores.model_used` 那一課：同一支片 `qwen3-vl:8b` 給 7.43、`qwen2.5vl:7b` 給 5.5
+  - **`UNKNOWN` 照存不丟** —— 「問了沒答案」跟「從沒問過」是兩種狀態，只有一種值得重跑
+  - 🔴 **離線抽取只能當 fallback**：實測掃既有 **2,828 筆** VLM 描述，只有 **17.3% 抽得出景別**，且 **488 筆裡 477 筆是 CU** —— 那是 VLM 把 close-up 當通用形容詞的用詞習慣，不是真實分布。storyboard 匯出因此**優先用已存標籤**，離線值只在沒有標籤時遞補
+  - **成本實測修正**：先前估「9.5 GPU 小時」是**高估**。受限輸出只要 12 個 token，實測 **39 楨 2.4 分鐘 ≈ 3.7s/楨**，全庫 2,872 楨約 **3 小時**
+  - **實跑一支驗證**（`Wax On Wax Off`，39 顆代表幀）：`LS 14 / MCU 11 / CU 5 / ECU 4 / MS 3 / UNKNOWN 2`，0 refused。那像真的景別分布。肉眼抽驗兩張：一張填滿畫面的臉判 ECU **正確**；一張片頭字卡判 LS —— **該回 UNKNOWN 而沒有回**，所以 `UNKNOWN` 是被低報的，這條寫進模組 docstring
+  - ⚠️ 目前 VLM 那條只接 ollama（本機有的那個），其他 backend 走 `--from-json`
 
 ### 6C. 運鏡（固定／手持／搖／跟／推拉）
 

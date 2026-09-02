@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -605,6 +605,51 @@ def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """A shot gains labels — and they hang off a timestamp, not a shot id (v15).
+
+    Shot size is the first `kind`. It cannot live as a column on `shots`,
+    because `save_shots` replaces a clip's spans wholesale on every re-analyze:
+    every stored label would be deleted with the row it sat on, silently, and
+    the next run would look like the clip had never been labelled.
+
+    The v13 `marks` migration already settled this shape for the same reason —
+    "a mark hangs off `t_sec`, which survives re-extraction because seven
+    seconds into a clip is still seven seconds into that clip". A label is the
+    same kind of thing: it describes what is on screen at a moment, and the
+    moment outlives whichever partition happened to be current when someone
+    looked.
+
+    `source` and `model` are not decoration. A craft score taught this repo that
+    a model-produced value without its origin is unusable the moment a second
+    model touches the library: the same clip scores 7.43 under `qwen3-vl:8b` and
+    5.5 under `qwen2.5vl:7b`. A shot size read by a VLM, a shot size pulled out
+    of an old description, and a shot size a person typed are three different
+    claims, and the uniqueness key includes `source` so all three can coexist
+    rather than overwrite each other.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_labels (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            t_sec           REAL NOT NULL,
+            kind            TEXT NOT NULL,
+            value           TEXT,
+            source          TEXT,
+            model           TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shot_labels_video ON shot_labels(video_id, kind);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_labels_unique
+            ON shot_labels(video_id, kind, t_sec, source);
+        """
+    )
+    conn.execute("UPDATE schema_version SET version = 15")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         # `REEL_SCOUT_DATA` defaults to "./data", i.e. relative to wherever the
@@ -675,6 +720,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 13
         if current_ver < 14:
             _migrate_v13_to_v14(conn)
+            current_ver = 14
+        if current_ver < 15:
+            _migrate_v14_to_v15(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -741,6 +789,21 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_shots_video ON shots(video_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_shots_video_idx ON shots(video_id, idx);
+
+        CREATE TABLE IF NOT EXISTS shot_labels (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            t_sec           REAL NOT NULL,
+            kind            TEXT NOT NULL,
+            value           TEXT,
+            source          TEXT,
+            model           TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shot_labels_video ON shot_labels(video_id, kind);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_labels_unique
+            ON shot_labels(video_id, kind, t_sec, source);
 
         CREATE TABLE IF NOT EXISTS performance (
             video_id        TEXT PRIMARY KEY REFERENCES videos(id),
@@ -1269,6 +1332,35 @@ def get_shots(conn: sqlite3.Connection, video_id: str) -> List[sqlite3.Row]:
         "SELECT * FROM shots WHERE video_id = ? ORDER BY idx", (video_id,)
     )
     return cur.fetchall()
+
+def save_shot_label(conn: sqlite3.Connection, video_id: str, t_sec: float,
+                    kind: str, value: Optional[str], source: str,
+                    model: Optional[str] = None) -> None:
+    """Upsert one label. Keyed by (video, kind, timestamp, source) so a VLM pass
+    and a human correction sit side by side instead of clobbering each other."""
+    with conn:
+        conn.execute(
+            "INSERT INTO shot_labels (video_id, t_sec, kind, value, source, model) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(video_id, kind, t_sec, source) DO UPDATE SET "
+            "value = excluded.value, model = excluded.model, "
+            "created_at = datetime('now')",
+            (video_id, float(t_sec), kind, value, source, model),
+        )
+
+
+def get_shot_labels(conn: sqlite3.Connection, video_id: str,
+                    kind: Optional[str] = None) -> List[sqlite3.Row]:
+    """Labels for a clip, in time order. Every row carries its own source and
+    model — a caller choosing between two labels for the same moment has to be
+    able to see which produced which."""
+    sql = "SELECT * FROM shot_labels WHERE video_id = ?"
+    params: List[Any] = [video_id]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    return conn.execute(sql + " ORDER BY t_sec, source", params).fetchall()
+
 
 
 # --- OCR Captions CRUD (§4F on-screen text / L3.5) ---
