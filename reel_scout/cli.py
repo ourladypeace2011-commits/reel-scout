@@ -342,6 +342,16 @@ def main(argv: List[str] = None) -> None:
     p_db_backfill.add_argument(
         "--dry-run", action="store_true", help="Report what would be filled; write nothing"
     )
+    p_db_shots = p_db_sub.add_parser(
+        "backfill-shots",
+        help="Compute the shot table for analyzed clips that predate schema v14",
+    )
+    p_db_shots.add_argument(
+        "--dry-run", action="store_true", help="Report what would be filled; write nothing"
+    )
+    p_db_shots.add_argument(
+        "--limit", type=int, default=0, help="Stop after N clips (0 = all)"
+    )
     p_db_invalid = p_db_sub.add_parser(
         "check-invalid",
         help="Find stored videos whose media never processed (0 keyframes but a "
@@ -1604,6 +1614,28 @@ def _cmd_db(args) -> None:
             print("  wrote %d caption(s) for %d video(s)"
                   % (r["captions"], r["videos_with_captions"]))
 
+    elif args.db_command == "backfill-shots":
+        from .backfill_shots import backfill
+
+        config.ensure_dirs()
+        conn = db.init_db()
+        try:
+            r = backfill(conn, dry_run=args.dry_run, limit=args.limit or None,
+                         progress=True)
+        finally:
+            conn.close()
+        print("clips needing a shot table: %d" % r["candidates"])
+        print("  %s %d, skipped %d (media gone), failed %d"
+              % ("would fill" if args.dry_run else "filled",
+                 r["filled"], r["skipped_no_media"], r["failed"]))
+        if r["skipped_no_media"]:
+            # Not a failure and not a success: the clip is still analyzed, the
+            # media it was measured from is simply not on this machine any more.
+            print("  media-gone clips keep their cut count and stay without spans "
+                  "— re-crawl to fill them", file=sys.stderr)
+        if args.dry_run:
+            print("  nothing written — re-run without --dry-run to apply")
+
     elif args.db_command == "check-invalid":
         from . import validity
 
@@ -1647,7 +1679,7 @@ def _cmd_db(args) -> None:
 
     else:
         print("Use: reel-scout db "
-              "{stats|reset|migrate|normalize-paths|backfill-text|check-invalid}")
+              "{stats|reset|migrate|normalize-paths|backfill-text|check-invalid|backfill-shots}")
 
 
 def _probe_cmd(cmd, timeout=5):
