@@ -31,7 +31,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from . import db, validity
+from . import db, shot_size, validity
 from .utils import paths as media_paths
 
 
@@ -117,6 +117,15 @@ def collect(conn) -> Dict[str, Any]:
         "with_shot_labels": _one(
             conn, "SELECT COUNT(DISTINCT l.video_id) FROM shot_labels l "
                   "JOIN videos v ON v.id = l.video_id WHERE 1=1" + _NOT_INVALID),
+        # Labels produced by a prompt that is no longer the current one. The
+        # prompt moved the answer ten-to-one on the same images, so this is not
+        # cosmetic drift — it is two different measurements sharing a column.
+        "labels_from_an_old_prompt": _one(
+            conn,
+            "SELECT COUNT(*) FROM shot_labels l JOIN videos v ON v.id = l.video_id "
+            "WHERE l.kind = 'shot_size' AND l.source = ? "
+            "AND COALESCE(l.prompt_hash, '') != ?" + _NOT_INVALID,
+            shot_size.SOURCE_VLM, shot_size.prompt_fingerprint()),
         "with_ocr": _one(
             conn, "SELECT COUNT(DISTINCT o.video_id) FROM ocr_captions o "
                   "JOIN videos v ON v.id = o.video_id WHERE 1=1" + _NOT_INVALID),
@@ -177,6 +186,12 @@ def findings(h: Dict[str, Any]) -> List[Dict[str, Any]]:
     add("shot sizes", True,
         "%d clip(s) labelled" % h["with_shot_labels"],
         "shot-size <video> (interviews are skipped by default)")
+
+    old_prompt = h.get("labels_from_an_old_prompt") or 0
+    add("shot-size prompt", old_prompt == 0,
+        "%d label(s) from a prompt that is no longer current" % old_prompt,
+        "shot-size <video> re-runs them" if old_prompt else None,
+        actionable=old_prompt > 0)
 
     add("on-screen text", True, "%d clip(s)" % h["with_ocr"])
 

@@ -226,3 +226,30 @@ def test_paths_row_is_not_actionable_even_when_every_path_is_relative():
         assert sum(1 for r in rows if r["actionable"]) == 0
     finally:
         conn.close(); os.unlink(path)
+
+def test_health_flags_labels_made_by_a_superseded_prompt():
+    # The prompt moved the answer ten-to-one on the same images, so a mixed
+    # column is two different measurements sharing a name.
+    from reel_scout.shot_size import prompt_fingerprint
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, "a")
+        db.save_shot_label(conn, vid, 1.0, "shot_size", "ECU", "vlm", "m", "OLD")
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "MCU", "vlm", "m",
+                           prompt_fingerprint())
+        r = _rows(conn)["shot-size prompt"]
+        assert r["actionable"] and "1 label" in r["detail"]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_health_is_quiet_when_every_label_is_from_the_current_prompt():
+    from reel_scout.shot_size import prompt_fingerprint
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, "a")
+        db.save_shot_label(conn, vid, 1.0, "shot_size", "MCU", "vlm", "m",
+                           prompt_fingerprint())
+        assert _rows(conn)["shot-size prompt"]["actionable"] is False
+    finally:
+        conn.close(); os.unlink(path)

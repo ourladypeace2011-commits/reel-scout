@@ -302,3 +302,84 @@ def test_a_relative_keyframe_path_is_resolved_not_read_raw(monkeypatch, tmp_path
         assert os.path.isabs(ask.call_args[0][0])
     finally:
         conn.close(); os.unlink(path)
+
+# --- the prompt is part of the provenance (schema v17) ---------------------
+
+def test_the_prompt_defines_each_code_not_just_names_it():
+    # "MLS = medium long shot" is the same words in a longer form, not a
+    # definition. Measured on 24 frames: codes+names returned ECU ten times
+    # where codes+definitions returned it once.
+    from reel_scout.shot_size import classification_prompt, SHOT_SIZES
+    p = classification_prompt()
+    for code in SHOT_SIZES:
+        assert code in p
+    for phrase in ("head to chest", "waist up", "knees up",
+                   "SUBJECT-TO-FRAME RATIO"):
+        assert phrase in p, phrase
+
+
+def test_the_fingerprint_follows_the_prompt_text():
+    from reel_scout import shot_size
+    before = shot_size.prompt_fingerprint()
+    original = shot_size._DEFINITIONS["MS"]
+    try:
+        shot_size._DEFINITIONS["MS"] = "something else entirely"
+        assert shot_size.prompt_fingerprint() != before, (
+            "a changed prompt must change the fingerprint, or the column "
+            "records nothing")
+    finally:
+        shot_size._DEFINITIONS["MS"] = original
+    assert shot_size.prompt_fingerprint() == before
+
+
+def test_a_vlm_label_records_the_prompt_that_produced_it():
+    from reel_scout.shot_size import prompt_fingerprint
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama", return_value="MCU"):
+            label_shots.label_video(conn, vid, "m")
+        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
+        assert row["prompt_hash"] == prompt_fingerprint()
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_supplied_label_carries_no_prompt_fingerprint():
+    # It did not come from our prompt; stamping one would claim a provenance it
+    # does not have.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        label_shots.label_video(conn, vid, "m", supplied={"11": "CU"})
+        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
+        assert row["prompt_hash"] is None
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_label_with_no_fingerprint_counts_as_stale():
+    # Rows written before v17 have none, and "unknown provenance" is not the
+    # same claim as "current".
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m")
+        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
+        assert label_shots.stale_prompt(row) is True
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_label_from_the_current_prompt_is_not_stale():
+    from reel_scout.shot_size import prompt_fingerprint
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m",
+                           prompt_fingerprint())
+        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
+        assert label_shots.stale_prompt(row) is False
+    finally:
+        conn.close(); os.unlink(path)
