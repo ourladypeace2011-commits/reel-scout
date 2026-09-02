@@ -160,6 +160,14 @@ def main(argv: List[str] = None) -> None:
                            help="Don't auto-open the browser")
 
     # --- export ---
+    p_size = sub.add_parser("shot-size", help="Label each shot with a shot size")
+    p_size.add_argument("video", help="Video id or unique prefix")
+    p_size.add_argument("--model", default="qwen2.5vl:7b",
+                        help="VLM to ask (ollama). Stamped on every stored row.")
+    p_size.add_argument("--base-url", default=None, help="ollama base URL")
+    p_size.add_argument("--from-json", default=None,
+                        help='Supply labels instead of asking a model: {"<keyframe id>": "CU"}')
+
     p_export = sub.add_parser("export", help="Export analyses")
     p_export.add_argument("--format", choices=["json", "csv", "html", "bundle", "skeleton", "storyboard"],
                           default="json")
@@ -381,6 +389,7 @@ def main(argv: List[str] = None) -> None:
         "note": _cmd_note,
         "group": _cmd_group,
         "mark": _cmd_mark,
+        "shot-size": _cmd_shot_size,
         "research": _cmd_research,
         "db": _cmd_db,
         "config": _cmd_config,
@@ -669,6 +678,43 @@ def _clip(text: str, width: int) -> str:
     whole line, which is how a reader ends up quoting half a sentence."""
     text = " ".join(text.split())
     return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def _cmd_shot_size(args) -> None:
+    from . import db
+    from .compare import resolve_ref
+    from .label_shots import label_video
+
+    conn = db.init_db()
+    video_id, matches = resolve_ref(conn, args.video)
+    if video_id is None:
+        print("Video not found: %s" % args.video)
+        if matches:
+            print("  did you mean: %s" % ", ".join(m[:12] for m in matches[:5]))
+        conn.close()
+        return
+    supplied = None
+    if args.from_json:
+        with open(args.from_json, encoding="utf-8") as f:
+            supplied = {str(k): v for k, v in (json.load(f) or {}).items()}
+    tally = label_video(conn, video_id, args.model,
+                        base_url=args.base_url, supplied=supplied)
+    print("shot sizes: %d labelled, %d UNKNOWN, %d refused, %d skipped, %d missing"
+          % (tally["labelled"], tally["unknown"], tally["refused"],
+             tally["skipped"], tally["missing"]))
+    if tally["missing"]:
+        print("  missing = the keyframe file could not be read (paths in this DB "
+              "are relative to the checkout that wrote them) — not a model problem",
+              file=sys.stderr)
+    if tally["unknown"]:
+        # Stored on purpose: "asked, no answer" and "never asked" are different
+        # states and only one is worth re-running.
+        print("  UNKNOWN is stored, not dropped — a title card or a graphic has "
+              "no subject to frame against")
+    if tally["refused"]:
+        print("  refused = the model answered something that was not one of the "
+              "codes; it will answer the same way on a retry", file=sys.stderr)
+    conn.close()
 
 
 def _cmd_show(args) -> None:

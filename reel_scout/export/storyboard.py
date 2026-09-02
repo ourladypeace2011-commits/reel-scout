@@ -86,9 +86,16 @@ def build_project(
     captions: List[Any],
     descriptions: Optional[Dict[int, str]] = None,
     aspect: Optional[str] = None,
+    shot_sizes: Optional[Dict[int, str]] = None,
 ) -> Dict[str, Any]:
     """One storyboard project from one analyzed clip. Pure — no DB, no ffmpeg."""
     descriptions = descriptions or {}
+    # A deliberate label beats one salvaged out of prose. Measured on the real
+    # library: pulling a size out of existing descriptions covers 17.3% of
+    # frames and 97.7% of what it does return is "CU" -- that is the VLM's habit
+    # of calling things close-ups, not the clip's framing. So a stored label
+    # wins, and the fallback stays as a fallback.
+    shot_sizes = shot_sizes or {}
     url = video["url"] or ""
     title = (video["title"] or "(untitled)").strip()
 
@@ -115,7 +122,8 @@ def build_project(
             # this export has no basis for, and guessing it would silently merge
             # cuts a person then has to pull apart.
             "groupId": "g%d" % (i + 1),
-            "shot": normalize_shot_size(desc) or "",
+            "shot": (shot_sizes.get(rep["id"]) if rep is not None else None)
+                    or normalize_shot_size(desc) or "",
             "desc": (desc or "").strip(),
             "vo": vo,
             "sup": sup,
@@ -191,9 +199,19 @@ def export_storyboard(conn, output_dir: str, video_id: Optional[str] = None) -> 
             print("  %s: aspect unknown (media missing) — the storyboard app will "
                   "assume 16:9, which is wrong for a vertical clip" % vid,
                   file=sys.stderr)
+        # UNKNOWN is stored so "asked, no answer" stays distinct from "never
+        # asked" -- but it is not a shot size, so it does not reach the cut.
+        sizes = {}
+        for lab in db.get_shot_labels(conn, vid, kind="shot_size"):
+            if lab["value"] in (None, "UNKNOWN"):
+                continue
+            for k in kfs:
+                if abs(k["timestamp_sec"] - lab["t_sec"]) < 1e-6:
+                    sizes[k["id"]] = lab["value"]
+                    break
         project = build_project(
             video, shots, kfs, segs, db.get_ocr_captions(conn, vid) or [],
-            descriptions=descriptions, aspect=aspect)
+            descriptions=descriptions, aspect=aspect, shot_sizes=sizes)
         with open(os.path.join(output_dir, "%s.project.json" % vid),
                   "w", encoding="utf-8") as f:
             json.dump(project, f, ensure_ascii=False, indent=2)

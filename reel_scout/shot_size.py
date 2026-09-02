@@ -29,7 +29,7 @@ confident wrong value in a field meant to be trustworthy.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 #: Canonical codes, widest-subject-first (ECU is the tightest framing).
 #: Source: `prompts/storyboard-visualize.md` — "景別用標準縮寫
@@ -105,3 +105,51 @@ def describe(code: Optional[str]) -> str:
     if not code:
         return "—"
     return "%s (%s)" % (code, SHOT_SIZE_NAMES.get(code, "unknown"))
+
+
+#: What a label's `source` column says when a VLM produced it under the
+#: constrained prompt below, vs. when it was pulled out of an old free-text
+#: description. They are different claims and must not overwrite each other.
+SOURCE_VLM = "vlm"
+SOURCE_DESCRIPTION = "description"
+
+#: The model may answer this when a frame has no subject to frame against — a
+#: title card, a graphic, black. Storing it is the point: "asked, no answer" and
+#: "never asked" are different states, and only one of them is worth re-running.
+UNKNOWN = "UNKNOWN"
+
+
+def classification_prompt() -> str:
+    """The constrained prompt, built from the vocabulary rather than repeating it.
+
+    Repeating the seven codes in a prompt string would create the third copy of
+    a list this module exists to keep at one.
+    """
+    options = ", ".join("%s = %s" % (c, SHOT_SIZE_NAMES[c]) for c in SHOT_SIZES)
+    return (
+        "Classify the SHOT SIZE of this film frame. Answer with exactly one code "
+        "from this list and nothing else:\n%s\n"
+        "If the frame has no identifiable subject to judge framing against, "
+        "answer %s." % (options, UNKNOWN)
+    )
+
+
+def parse_answer(raw: Optional[str]) -> Optional[str]:
+    """A code, `UNKNOWN`, or None when the reply was neither.
+
+    Strict on purpose. A model that answers "probably a medium shot" has not
+    followed the instruction, and quietly salvaging a code out of that sentence
+    would hide how often the constraint is being ignored — which is the number
+    worth watching when the backend or model changes.
+    """
+    if not raw:
+        return None
+    first = str(raw).strip().split()
+    if not first:
+        return None
+    token = first[0].strip(".,:;\"'").upper()
+    if token in SHOT_SIZES:
+        return token
+    if token == UNKNOWN:
+        return UNKNOWN
+    return None

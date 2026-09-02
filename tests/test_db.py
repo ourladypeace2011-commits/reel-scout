@@ -724,7 +724,10 @@ def test_migration_creates_shots_on_a_v13_database():
         conn.execute("UPDATE schema_version SET version = 13")
         conn.commit()
         db.init_db(conn)
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
+        # Against SCHEMA_VERSION, not a literal: the ladder runs every later
+        # migration too, and pinning 14 here breaks the moment one is added.
+        assert (conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == db.SCHEMA_VERSION)
         vid = db.upsert_video(conn, "youtube", "s7", "https://yt/s7", title="S7")
         assert db.save_shots(conn, vid, [_shot(0, 0.0, 1.0)]) == 1
         assert len(db.get_shots(conn, vid)) == 1
@@ -741,6 +744,9 @@ def test_migration_is_idempotent():
         db._migrate_v13_to_v14(conn)      # running it again must not lose rows
         assert len(db.get_shots(conn, vid)) == 1
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
+        db.init_db(conn)                  # and the ladder puts it back to current
+        assert (conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == db.SCHEMA_VERSION)
     finally:
         conn.close()
         os.unlink(path)
