@@ -52,9 +52,9 @@ Phase 5+ ████████████████████  ✅ 靜�
 Phase 6  ████████░░░░░░░░░░░░  🔨 Shot-level 反解 — **6A 完成**（`shots` 表 schema v14 ＋ 代表幀 ＋ VO/字卡投影）；6B 景別／6C 運鏡／6D 交付格式待做
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**926 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v14**
+**目前版本**：**v1.3.1** ｜ **測試**：**948 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v14**
 
-> 基準寫清楚免得下一個人重數：`master` 918 ＋ 本支 8 ＝ **926**。schema **v14**（`shots` 表）。
+> 基準寫清楚免得下一個人重數：`master` 926 ＋ 本支 22 ＝ **948**。schema **v14**（`shots` 表）。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 
@@ -324,7 +324,11 @@ return len(_TS_PATTERN.findall(stderr))   # ← pts_time 全解出來了，只�
 
 VLM 現在用散文說「close-up shot」，**沒有正規化欄位**。而詞彙表已經寫在自己 repo 裡了——`prompts/storyboard-visualize.md` 的 ECU / CU / MCU / MS / MLS / LS / ELS，只是它現在服務的是**正向**（鏡頭表 → 生圖 prompt）。反向要的是同一套詞當**受限輸出**。
 
-- [ ] 每顆 shot 一個景別標籤，值域來自既有 prompt pack，不另造一套
+- [x] ✅ **2026-09-02**：詞彙與正規化落地（`reel_scout/shot_size.py`）。值域 `ECU / CU / MCU / MS / MLS / LS / ELS` **直接引用 `prompts/storyboard-visualize.md:100`**，並有一支測試去讀那個檔比對——**兩份清單會漂，而且會靜默地漂**，所以只有一份、另一份是被驗的副本。
+  - `normalize()` **兩種情況一律回 None**：句子沒提到取景（多數如此）、或一句裡出現兩種不同景別（「a close-up of a hand against a wide shot backdrop」有真正的答案，但那個答案不在這句話裡，取第一個命中會長得跟「知道」一模一樣）
+  - **鏡頭語言不是景別**：`wide-angle lens` 講的是光學，廣角鏡天天在拍特寫。硬映射會把一個有信心的錯值放進一個本來要拿來信任的欄位
+  - 兩字碼只以整詞比對 —— 否則 `cu` 會在 `curtain` / `document` / `focus` 裡命中
+- [ ] 🔴 **標籤的來源還沒決定，而離線抽取這條路已經被資料否掉了**（2026-09-02 實測）：拿 `normalize()` 掃既有 **2,828 筆** VLM 描述，只有 **17.3% 抽得出景別**，而且 **488 筆裡有 477 筆是 CU**。那不是真實的景別分布，是 VLM 把 close-up 當通用形容詞的用詞習慣。→ **離線抽取只能當 fallback，不能當主要來源。** 主要來源要嘛讓 VLM 從固定清單裡選（重跑 2,872 楨，約 9.5 GPU 小時，且是 model-dependent）、要嘛走既有的 `ingest` agent 路徑由外部供給。**兩條都要把來源與模型戳記進去**（比照 `scores.model_used` 的教訓），未拍板
 
 ### 6C. 運鏡（固定／手持／搖／跟／推拉）
 
