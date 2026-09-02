@@ -160,6 +160,13 @@ def main(argv: List[str] = None) -> None:
                            help="Don't auto-open the browser")
 
     # --- export ---
+    p_sbdiff = sub.add_parser(
+        "storyboard-diff",
+        help="Compare an edited storyboard project against the teardown it came from")
+    p_sbdiff.add_argument("video", help="Video id or unique prefix")
+    p_sbdiff.add_argument("project", help="Path to the edited project.json")
+    p_sbdiff.add_argument("--json", action="store_true", help="Machine-readable output")
+
     p_size = sub.add_parser("shot-size", help="Label each shot with a shot size")
     p_size.add_argument("video", help="Video id or unique prefix")
     p_size.add_argument("--model", default="qwen2.5vl:7b",
@@ -413,6 +420,7 @@ def main(argv: List[str] = None) -> None:
         "group": _cmd_group,
         "mark": _cmd_mark,
         "shot-size": _cmd_shot_size,
+        "storyboard-diff": _cmd_storyboard_diff,
         "research": _cmd_research,
         "db": _cmd_db,
         "config": _cmd_config,
@@ -701,6 +709,68 @@ def _clip(text: str, width: int) -> str:
     whole line, which is how a reader ends up quoting half a sentence."""
     text = " ".join(text.split())
     return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def _cmd_storyboard_diff(args) -> None:
+    from . import db, storyboard_diff
+    from .compare import resolve_ref
+    from .export.storyboard import build_project
+
+    conn = db.init_db()
+    video_id, matches = resolve_ref(conn, args.video)
+    if video_id is None:
+        print("Video not found: %s" % args.video)
+        if matches:
+            print("  did you mean: %s" % ", ".join(m[:12] for m in matches[:5]))
+        conn.close()
+        return
+    try:
+        with open(args.project, encoding="utf-8") as f:
+            edited = json.load(f)
+    except (OSError, ValueError) as e:
+        print("Could not read %s: %s" % (args.project, e))
+        conn.close()
+        return
+
+    # The reference is rebuilt from the database rather than read from whatever
+    # file happens to be lying around: comparing against a stale export would
+    # report edits nobody made.
+    video = db.get_video(conn, video_id)
+    rows = db.get_shots(conn, video_id)
+    if not rows:
+        print("No shot table for this clip — nothing to compare against. "
+              "Run `db backfill-shots` or `analyze` first.")
+        conn.close()
+        return
+    from .shots import Shot
+    shots = [Shot(r["idx"], r["start_sec"], r["end_sec"], r["dur_sec"]) for r in rows]
+    kfs = db.get_keyframes_with_descriptions(conn, video_id) or []
+    descs = {k["id"]: k["description"] for k in kfs if k["description"]}
+    transcript = db.get_transcript(conn, video_id)
+    segs = []
+    if transcript and transcript["segments_json"]:
+        try:
+            segs = json.loads(transcript["segments_json"]) or []
+        except ValueError:
+            segs = []
+    sizes = {}
+    for lab in db.get_shot_labels(conn, video_id, kind="shot_size"):
+        if lab["value"] in (None, "UNKNOWN"):
+            continue
+        for k in kfs:
+            if abs(k["timestamp_sec"] - lab["t_sec"]) < 1e-6:
+                sizes[k["id"]] = lab["value"]
+                break
+    reference = build_project(video, shots, kfs, segs,
+                              db.get_ocr_captions(conn, video_id) or [],
+                              descriptions=descs, shot_sizes=sizes)
+    conn.close()
+
+    d = storyboard_diff.diff(reference, edited)
+    if args.json:
+        print(json.dumps(d, ensure_ascii=False, indent=2))
+    else:
+        print(storyboard_diff.format_diff(d, video["title"] or ""))
 
 
 def _cmd_shot_size(args) -> None:
