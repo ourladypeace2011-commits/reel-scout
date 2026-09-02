@@ -345,6 +345,16 @@ def main(argv: List[str] = None) -> None:
     p_db_backfill.add_argument(
         "--dry-run", action="store_true", help="Report what would be filled; write nothing"
     )
+    p_db_health = p_db_sub.add_parser(
+        "health",
+        help="Every corpus gap in one place, each next to the command that fixes it",
+    )
+    p_db_health.add_argument(
+        "--strict", action="store_true",
+        help="Exit non-zero when a gap something here could close is open. "
+             "Media that is simply gone never counts — a check that goes red "
+             "over work nobody can do gets turned off.",
+    )
     p_db_shots = p_db_sub.add_parser(
         "backfill-shots",
         help="Compute the shot table for analyzed clips that predate schema v14",
@@ -1554,7 +1564,7 @@ def _cmd_patterns(args) -> None:
         conn.close()
 
 
-def _cmd_db(args) -> None:
+def _cmd_db(args):
     from . import db
 
     if args.db_command == "stats":
@@ -1624,6 +1634,20 @@ def _cmd_db(args) -> None:
             print("  wrote %d caption(s) for %d video(s)"
                   % (r["captions"], r["videos_with_captions"]))
 
+    elif args.db_command == "health":
+        from . import health as _health
+
+        config.ensure_dirs()
+        conn = db.init_db()
+        try:
+            h = _health.collect(conn)
+            rows = _health.findings(h)
+        finally:
+            conn.close()
+        print(_health.format_report(h, rows))
+        if args.strict and any(r["actionable"] for r in rows):
+            return 1
+
     elif args.db_command == "backfill-shots":
         from .backfill_shots import backfill
 
@@ -1689,7 +1713,7 @@ def _cmd_db(args) -> None:
 
     else:
         print("Use: reel-scout db "
-              "{stats|reset|migrate|normalize-paths|backfill-text|check-invalid|backfill-shots}")
+              "{stats|reset|migrate|normalize-paths|backfill-text|check-invalid|backfill-shots|health}")
 
 
 def _probe_cmd(cmd, timeout=5):
