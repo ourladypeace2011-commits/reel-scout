@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -650,6 +650,51 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """Side-by-side translations of the free text (v15 -> v16).
+
+    The decoded enums became translatable at the display layer because the model
+    only picks from a closed list. Free text is different: a summary, a frame
+    description, a line of transcript, a scoring rationale — those words are the
+    model's own, and a translation is a second artifact, not a relabelling.
+
+    So translations live in their own table and the original is never replaced.
+    A reader sees both, and the row says which engine produced the Chinese.
+
+    🔴 `source_hash` is the load-bearing column. Descriptions get re-run when a
+    VLM changes; transcripts get re-cut when the language track is fixed. A
+    translation stored without a fingerprint of what it translated would go on
+    being displayed beside text it no longer matches — silently, and looking
+    exactly like a current one. With the hash, a stale row can say so.
+
+    `ref` addresses the piece inside a clip: a keyframe id, a transcript segment
+    index, a timeline index, or '' for the whole-clip kinds (summary, reasoning).
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS translations (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            kind            TEXT NOT NULL,
+            ref             TEXT NOT NULL DEFAULT '',
+            lang            TEXT NOT NULL,
+            source_hash     TEXT NOT NULL,
+            text            TEXT,
+            engine          TEXT,
+            model           TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_translations_video
+            ON translations(video_id, kind, lang);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_translations_unique
+            ON translations(video_id, kind, ref, lang);
+        """
+    )
+    conn.execute("UPDATE schema_version SET version = 16")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         # `REEL_SCOUT_DATA` defaults to "./data", i.e. relative to wherever the
@@ -723,6 +768,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 14
         if current_ver < 15:
             _migrate_v14_to_v15(conn)
+            current_ver = 15
+        if current_ver < 16:
+            _migrate_v15_to_v16(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -804,6 +852,24 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_shot_labels_video ON shot_labels(video_id, kind);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_labels_unique
             ON shot_labels(video_id, kind, t_sec, source);
+
+        CREATE TABLE IF NOT EXISTS translations (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            kind            TEXT NOT NULL,
+            ref             TEXT NOT NULL DEFAULT '',
+            lang            TEXT NOT NULL,
+            source_hash     TEXT NOT NULL,
+            text            TEXT,
+            engine          TEXT,
+            model           TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_translations_video
+            ON translations(video_id, kind, lang);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_translations_unique
+            ON translations(video_id, kind, ref, lang);
 
         CREATE TABLE IF NOT EXISTS performance (
             video_id        TEXT PRIMARY KEY REFERENCES videos(id),
@@ -1360,6 +1426,39 @@ def get_shot_labels(conn: sqlite3.Connection, video_id: str,
         sql += " AND kind = ?"
         params.append(kind)
     return conn.execute(sql + " ORDER BY t_sec, source", params).fetchall()
+
+def source_fingerprint(text: Optional[str]) -> str:
+    """Stable fingerprint of the text a translation was made from."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def save_translation(conn: sqlite3.Connection, video_id: str, kind: str, ref: str,
+                     lang: str, source_text: Optional[str], text: Optional[str],
+                     engine: str, model: Optional[str] = None) -> None:
+    """Upsert one translation, fingerprinting the source it was made from."""
+    with conn:
+        conn.execute(
+            "INSERT INTO translations (video_id, kind, ref, lang, source_hash, "
+            "text, engine, model) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(video_id, kind, ref, lang) DO UPDATE SET "
+            "source_hash = excluded.source_hash, text = excluded.text, "
+            "engine = excluded.engine, model = excluded.model, "
+            "created_at = datetime('now')",
+            (video_id, kind, str(ref), lang, source_fingerprint(source_text),
+             text, engine, model),
+        )
+
+
+def get_translations(conn: sqlite3.Connection, video_id: str,
+                     kind: Optional[str] = None,
+                     lang: str = "zh") -> List[sqlite3.Row]:
+    sql = "SELECT * FROM translations WHERE video_id = ? AND lang = ?"
+    params: List[Any] = [video_id, lang]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    return conn.execute(sql + " ORDER BY kind, ref", params).fetchall()
+
 
 
 
