@@ -161,7 +161,7 @@ def main(argv: List[str] = None) -> None:
 
     # --- export ---
     p_export = sub.add_parser("export", help="Export analyses")
-    p_export.add_argument("--format", choices=["json", "csv", "html", "bundle", "skeleton"],
+    p_export.add_argument("--format", choices=["json", "csv", "html", "bundle", "skeleton", "storyboard"],
                           default="json")
     p_export.add_argument("--output", "-o", default="./export")
     p_export.add_argument("--video", help="Single video id (html/bundle: exact or unique prefix)")
@@ -839,6 +839,21 @@ def _cmd_export(args) -> None:
                 return
         count = export_skeleton(conn, args.output, video_id=video_id)
         print(f"Wrote {count} skeleton JSON file(s) to {args.output}/")
+    elif args.format == "storyboard":
+        from .export.storyboard import export_storyboard
+        video_id = None
+        if getattr(args, "video", None):
+            from .compare import resolve_ref
+            video_id, _ = resolve_ref(conn, args.video)
+            if video_id is None:
+                print(f"Video not found: {args.video}")
+                conn.close()
+                return
+        count = export_storyboard(conn, args.output, video_id=video_id)
+        print(f"Wrote {count} storyboard project(s) to {args.output}/")
+        if count:
+            print("  every cut is marked REF: with its source URL and timecode — "
+                  "these are teardowns of someone else's footage, not treatments")
     elif args.format == "csv":
         count = export_csv(conn, args.output)
         print(f"Exported {count} rows to {args.output}")
