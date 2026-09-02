@@ -529,9 +529,10 @@ def _process_single(
             print("  Shot metrics already computed")
         else:
             try:
-                from ..shots import compute_shot_metrics
+                from ..shots import compute_shot_table
                 print("  Measuring shot rhythm...")
-                sm = compute_shot_metrics(file_path, duration_sec=video["duration_sec"])
+                table = compute_shot_table(file_path, duration_sec=video["duration_sec"])
+                sm, shot_spans = table if table else (None, [])
                 bpm = energy = None
                 # Audio energy/BPM needs only a decoded WAV (no PANNs model): pure-
                 # stdlib energy + numpy-gated best-effort BPM. Skipped cleanly if
@@ -571,6 +572,11 @@ def _process_single(
                     if sm:
                         print("  Shot metrics: %.2f cuts/min, %d shots" % (
                             sm.cuts_per_minute, sm.shot_count))
+                    # The spans behind that count. Written from the same pass, so
+                    # the table and the aggregate cannot describe different clips.
+                    if shot_spans:
+                        n = db.save_shots(conn, video_id, shot_spans)
+                        print("  Shot table: %d span(s) stored" % n)
             except Exception as e:  # noqa: BLE001 — measured pacing is best-effort
                 print("  Shot metrics skipped: %s" % e, file=sys.stderr)
 

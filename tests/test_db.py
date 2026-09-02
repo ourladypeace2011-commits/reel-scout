@@ -636,3 +636,111 @@ def test_text_that_is_all_one_script_says_nothing(capsys):
     db.warn_script_mix("這個場景很好", "frame description")
     assert capsys.readouterr().err == ""
     db._script_mix_warned.clear()
+
+
+# --- shots table (schema v14, roadmap Phase 6A) ----------------------------
+
+def _shot(i, a, b):
+    from reel_scout.shots import Shot
+    return Shot(index=i, start_sec=a, end_sec=b, dur_sec=round(b - a, 3))
+
+
+def test_save_shots_round_trips_in_clip_order():
+    conn, path = _temp_db()
+    try:
+        vid = db.upsert_video(conn, "youtube", "s1", "https://yt/s1", title="S1")
+        n = db.save_shots(conn, vid, [_shot(0, 0.0, 2.0), _shot(1, 2.0, 7.5),
+                                      _shot(2, 7.5, 10.0)])
+        assert n == 3
+        rows = db.get_shots(conn, vid)
+        assert [r["idx"] for r in rows] == [0, 1, 2]
+        assert rows[1]["start_sec"] == 2.0 and rows[1]["dur_sec"] == 5.5
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_save_shots_replaces_rather_than_appends():
+    # A second analyze pass measures the same clip again. Appending would leave
+    # two overlapping partitions behind one video_id with nothing marking which
+    # is current.
+    conn, path = _temp_db()
+    try:
+        vid = db.upsert_video(conn, "youtube", "s2", "https://yt/s2", title="S2")
+        db.save_shots(conn, vid, [_shot(0, 0.0, 5.0), _shot(1, 5.0, 10.0)])
+        db.save_shots(conn, vid, [_shot(0, 0.0, 10.0)])
+        rows = db.get_shots(conn, vid)
+        assert len(rows) == 1
+        assert rows[0]["end_sec"] == 10.0
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_save_shots_empty_clears_instead_of_leaving_a_stale_partition():
+    conn, path = _temp_db()
+    try:
+        vid = db.upsert_video(conn, "youtube", "s3", "https://yt/s3", title="S3")
+        db.save_shots(conn, vid, [_shot(0, 0.0, 5.0)])
+        assert db.save_shots(conn, vid, []) == 0
+        assert db.get_shots(conn, vid) == []
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_save_shots_is_scoped_to_one_video():
+    conn, path = _temp_db()
+    try:
+        a = db.upsert_video(conn, "youtube", "s4", "https://yt/s4", title="S4")
+        b = db.upsert_video(conn, "youtube", "s5", "https://yt/s5", title="S5")
+        db.save_shots(conn, a, [_shot(0, 0.0, 3.0)])
+        db.save_shots(conn, b, [_shot(0, 0.0, 4.0), _shot(1, 4.0, 8.0)])
+        db.save_shots(conn, b, [])          # clearing b must not touch a
+        assert len(db.get_shots(conn, a)) == 1
+        assert db.get_shots(conn, b) == []
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_get_shots_is_empty_for_a_clip_analyzed_before_v14():
+    # Not an error state - the honest answer for a pre-migration clip.
+    conn, path = _temp_db()
+    try:
+        vid = db.upsert_video(conn, "youtube", "s6", "https://yt/s6", title="S6")
+        assert db.get_shots(conn, vid) == []
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_migration_creates_shots_on_a_v13_database():
+    conn, path = _temp_db()
+    try:
+        # Simulate v13: move the table aside (a rename, so nothing is destroyed)
+        # and wind the version back, then let init_db run the ladder.
+        conn.execute("ALTER TABLE shots RENAME TO shots_v13_stash")
+        conn.execute("UPDATE schema_version SET version = 13")
+        conn.commit()
+        db.init_db(conn)
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
+        vid = db.upsert_video(conn, "youtube", "s7", "https://yt/s7", title="S7")
+        assert db.save_shots(conn, vid, [_shot(0, 0.0, 1.0)]) == 1
+        assert len(db.get_shots(conn, vid)) == 1
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_migration_is_idempotent():
+    conn, path = _temp_db()
+    try:
+        vid = db.upsert_video(conn, "youtube", "s8", "https://yt/s8", title="S8")
+        db.save_shots(conn, vid, [_shot(0, 0.0, 1.0)])
+        db._migrate_v13_to_v14(conn)      # running it again must not lose rows
+        assert len(db.get_shots(conn, vid)) == 1
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
+    finally:
+        conn.close()
+        os.unlink(path)
