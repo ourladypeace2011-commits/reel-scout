@@ -344,3 +344,134 @@ def test_csv_grouping_survives_a_non_ascii_model_label():
     finally:
         conn.close()
         os.unlink(path)
+
+
+# --- evidence coverage (roadmap §4E visibility) -----------------------------
+
+def test_evidence_coverage_separates_scored_from_measured():
+    # The defect this exists for: a score with shot_metrics behind it and a
+    # score without look identical on screen, while only the first one has
+    # `pacing` resting on a measurement.
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)  # three scored videos, none with shot_metrics yet
+        s = stats.compute_stats(conn)
+        ev = s["evidence_coverage"]
+        assert ev["scored"] == 3
+        assert ev["scored_with_measured"] == 0
+        assert ev["scored_without_measured"] == 3
+
+        vid = conn.execute(
+            "SELECT id FROM videos WHERE platform_id = 'a'").fetchone()["id"]
+        db.save_shot_metrics(conn, vid, shot_count=12, cuts_per_minute=8.0,
+                             avg_shot_sec=7.5)
+        ev = stats.compute_stats(conn)["evidence_coverage"]
+        assert ev["scored"] == 3
+        assert ev["scored_with_measured"] == 1
+        assert ev["scored_without_measured"] == 2
+        assert ev["measured_videos"] == 1
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_evidence_coverage_counts_on_screen_text_by_video_not_caption():
+    # ocr_captions holds one row per caption; a video with twelve captions is
+    # still one video of coverage.
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        vid = conn.execute(
+            "SELECT id FROM videos WHERE platform_id = 'a'").fetchone()["id"]
+        for i in range(12):
+            conn.execute(
+                "INSERT INTO ocr_captions (video_id, timestamp_sec, text, engine) "
+                "VALUES (?,?,?,?)", (vid, float(i), "frame %d" % i, "vlm"))
+        conn.commit()
+        ev = stats.compute_stats(conn)["evidence_coverage"]
+        assert ev["on_screen_text_videos"] == 1
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_evidence_coverage_is_channel_scoped():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        for pid in ("a", "b"):
+            vid = conn.execute(
+                "SELECT id FROM videos WHERE platform_id = ?", (pid,)).fetchone()["id"]
+            db.save_shot_metrics(conn, vid, shot_count=5, cuts_per_minute=3.0)
+        ev = stats.compute_stats(conn, channel="Chan Two")["evidence_coverage"]
+        assert ev["scored"] == 1
+        assert ev["scored_with_measured"] == 0
+        ev = stats.compute_stats(conn, channel="Chan One")["evidence_coverage"]
+        assert ev["scored"] == 2
+        assert ev["scored_with_measured"] == 2
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_formatter_names_the_scores_that_have_no_measurement():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        vid = conn.execute(
+            "SELECT id FROM videos WHERE platform_id = 'a'").fetchone()["id"]
+        db.save_shot_metrics(conn, vid, shot_count=12, cuts_per_minute=8.0)
+        text = stats.format_stats(stats.compute_stats(conn))
+        assert "Evidence coverage" in text
+        assert "without measured" in text
+        # The count, and the consequence, both have to be on screen: a bare
+        # number does not tell the reader that pacing degraded to a guess.
+        assert "model judgement" in text
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_formatter_omits_the_without_line_when_every_score_is_backed():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        for pid in ("a", "b", "c"):
+            vid = conn.execute(
+                "SELECT id FROM videos WHERE platform_id = ?", (pid,)).fetchone()["id"]
+            db.save_shot_metrics(conn, vid, shot_count=9, cuts_per_minute=6.0)
+        text = stats.format_stats(stats.compute_stats(conn))
+        assert "Evidence coverage" in text
+        assert "without measured" not in text
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_csv_carries_evidence_rows_even_when_all_zero():
+    # "no evidence" and "this CSV predates evidence reporting" must not look
+    # the same to whoever opens the file.
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        rows = stats.to_csv_rows(stats.compute_stats(conn))
+        ev_rows = {r[2]: r[3] for r in rows if r[0] == "evidence"}
+        assert ev_rows["scored"] == 3
+        assert ev_rows["scored_with_measured"] == 0
+        assert ev_rows["measured_videos"] == 0
+        assert ev_rows["on_screen_text_videos"] == 0
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_empty_corpus_evidence_block_does_not_crash_the_formatter():
+    conn, path = _fresh_db()
+    try:
+        ev = stats.compute_stats(conn)["evidence_coverage"]
+        assert ev["scored"] == 0
+        text = stats.format_stats(stats.compute_stats(conn))
+        assert "no scored videos in scope" in text
+    finally:
+        conn.close()
+        os.unlink(path)
