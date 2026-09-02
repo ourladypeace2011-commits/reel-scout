@@ -229,6 +229,62 @@ def bind_frames_to_shots(
     return out, unassigned
 
 
+def bind_spans_to_shots(
+    shots: Sequence[Shot],
+    items: Sequence[Any],
+    span_of: Optional[Callable[[Any], Tuple[float, float]]] = None,
+) -> Tuple[List[List[Any]], List[Any]]:
+    """Group timed *spans* (a line of VO, a caption that holds) under shots.
+
+    Unlike a keyframe, a span has width and can straddle a cut. An item lands
+    under **every shot it overlaps**, not just the one it starts in.
+
+    That choice is about what the downstream question is. A storyboard cut asks
+    "what is being said over this shot"; if a twelve-second line is filed only
+    under the shot it began in, the next two shots read as having no VO — which
+    is wrong information, not missing information. The repetition is bounded by
+    the shot boundaries themselves, so it is structure, not noise.
+
+    Overlap is half-open on both sides: `a < shot.end and b > shot.start`. A
+    zero-width item degrades to point semantics via `shot_index_for`, so a
+    subtitle cue with `start == end` still lands somewhere.
+
+    A zero-length shot never receives anything, matching
+    `bind_frames_to_shots`: nothing was on screen for zero seconds, so nothing
+    was said over it either. Without this the overlap test would happily file a
+    straddling line under a span of no duration.
+    """
+    get = span_of or (lambda x: (float(x["start"]), float(x["end"])))
+    buckets: List[List[Any]] = [[] for _ in shots]
+    unassigned: List[Any] = []
+    for it in items:
+        try:
+            a, b = get(it)
+            a, b = float(a), float(b)
+        except (TypeError, ValueError, KeyError, IndexError):
+            unassigned.append(it)
+            continue
+        if b < a:
+            a, b = b, a
+        if a == b:
+            i = shot_index_for(a, shots)
+            if i is None:
+                unassigned.append(it)
+            else:
+                buckets[i].append(it)
+            continue
+        hit = False
+        for i, sh in enumerate(shots):
+            if sh.end_sec <= sh.start_sec:
+                continue  # zero-length shot holds nothing
+            if a < sh.end_sec and b > sh.start_sec:
+                buckets[i].append(it)
+                hit = True
+        if not hit:
+            unassigned.append(it)
+    return buckets, unassigned
+
+
 def _representative(shot: Shot, frames: List[Any], get: Callable[[Any], float]) -> Optional[Any]:
     """The frame nearest the shot's midpoint; ties go to the earlier one.
 

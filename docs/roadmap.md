@@ -49,12 +49,12 @@ Phase 3  ████████████████████  ✅ Batch
 Phase 4  ████████████████████  ✅ Content Strategy Engine — 4A research ✅、4B inspire ✅、4C MCP 擴充 ✅、4D track ✅、4E 評分證據化 ✅、4F L3.5 OCR ✅
 Phase 5  ████████████████████  ✅ Tool Hygiene — LICENSE/README/CHANGELOG ✅、analyze-local ✅、yt-dlp 健壯性 ✅、CI ✅、config check ✅、**PyPI 上架 ✅（v1.2.0，Trusted Publishing 零 token）**
 Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
-Phase 6  ████░░░░░░░░░░░░░░░░  🔨 Shot-level 反解 — **6A 地基已落地**（`shots` 表，schema v14）；6B 景別／6C 運鏡／6D 交付格式待做
+Phase 6  ████████░░░░░░░░░░░░  🔨 Shot-level 反解 — **6A 完成**（`shots` 表 schema v14 ＋ 代表幀 ＋ VO/字卡投影）；6B 景別／6C 運鏡／6D 交付格式待做
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**918 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v14**
+**目前版本**：**v1.3.1** ｜ **測試**：**926 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v14**
 
-> 基準寫清楚免得下一個人重數：`master` 909 ＋ 本支 9 ＝ **918**。schema **v14**（`shots` 表）。
+> 基準寫清楚免得下一個人重數：`master` 918 ＋ 本支 8 ＝ **926**。schema **v14**（`shots` 表）。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 
@@ -313,7 +313,12 @@ return len(_TS_PATTERN.findall(stderr))   # ← pts_time 全解出來了，只�
   - 區間外的幀**回報不吞掉**：那代表幀表與鏡頭表是對同一支片的兩次不同量測
   - `show` 新增 Shots 區塊（超過 20 顆截斷並說明截了幾顆）
   - 🔴 **同輪修掉 6A 自己埋的一個 bug**：`shots_from_cuts` 原本把邊界 `round(...,3)`，而 keyframe 帶的是全精度時間碼。同一個剪點 `7.5075` 被存成 `7.508`（進位）→ 幀掉到前一顆；`13.680333` 被存成 `13.68`（捨去）→ 正確。**四捨五入的方向決定歸屬，所以剛好一半錯**（實測 19/19），而且不會有任何東西報錯。改成**只在顯示時 round、儲存不 round**。實測效果：Wax On Wax Off 有幀的鏡頭 **30 → 39**
-- [ ] 逐字稿 segment 與 `ocr_captions` 依時間區間投影到 shot → **旁白與字卡自動分流到各自的鏡頭**（兩條原始訊號都已存在，這步是接線不是新演算法）
+- [x] ✅ **2026-09-02**：逐字稿 segment 與 `ocr_captions` 投影到 shot ——**旁白與字卡自動分流到各自的鏡頭**。至此 **6A 完成**。
+  - 字卡是**時間點**，跟 keyframe 同形，直接複用 `bind_frames_to_shots`
+  - 🔴 **旁白是時間區間，不是點** —— 一句 VO 可以橫跨數顆鏡頭，所以這裡有一個要拍板的岔路，選了**按重疊全掛**（Hevin 2026-09-02 拍板）：一句話出現在它涵蓋的**每一顆**鏡頭底下。理由是這條線的終點是 6D 分鏡交付格式，而分鏡表的 `vo` 欄問的是「這顆鏡頭當下在講什麼」——**把一句十二秒的旁白只歸給它開始的那顆，後兩顆就會讀成沒有台詞，那是錯的資訊不是缺的資訊**。重複由 span 邊界天然界定，是結構不是雜訊
+  - 重疊判定兩端都半開（`a < end and b > start`）：收尾正好在剪點上的句子不會外溢到下一顆；零寬 span（VTT 字幕 cue 真的會 `start == end`）退化成點語意；零長度鏡頭一樣什麼都不收
+  - `show` 的 Shots 區塊補上 `vo:` / `sup:` 兩行（截斷並標示），表頭加上「幾顆有 VO／幾顆有字卡」
+  - ⚠️ **方法學修正**：mutation 測試改為 `PYTHONDONTWRITEBYTECODE=1`。Python 的原始碼 mtime 檢查是**秒級**的，而 mutate→restore 在同一秒內完成時，還原後的檔案會沿用突變版的 bytecode —— 那會同時製造假的 CAUGHT 與假的 MISSED。發現後把 #88 的三個關鍵守衛也在無 bytecode 下重驗過，結論不變
 
 ### 6B. 受限詞彙：景別
 
