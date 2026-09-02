@@ -212,3 +212,64 @@ def test_migration_is_idempotent():
         assert len(db.get_shot_labels(conn, vid)) == 1
     finally:
         conn.close(); os.unlink(path)
+
+
+# --- interviews are skipped by default -------------------------------------
+
+def _analysis(conn, vid, style_format):
+    db.save_analysis(conn, vid, summary="", topics_json="[]",
+                     hooks_json="{}", style_json=json.dumps({"format": style_format}),
+                     engagement_signals_json="{}",
+                     full_json=json.dumps({"style": {"format": style_format}}))
+
+
+def test_an_interview_is_skipped_and_says_so():
+    # Every shot is the same locked-off framing; at ~3.7s a frame that is half
+    # an hour spent confirming one answer.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn)
+        _analysis(conn, vid, "talking_head")
+        with patch.object(label_shots, "classify_with_ollama") as ask:
+            tally = label_shots.label_video(conn, vid, "m")
+        ask.assert_not_called()
+        assert tally["skipped_format"] == "talking_head"
+        assert tally["labelled"] == 0
+        assert db.get_shot_labels(conn, vid, kind="shot_size") == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_force_labels_an_interview_anyway():
+    # "mostly uniform" is not "uniform" — the exceptions have to stay reachable.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn)
+        _analysis(conn, vid, "talking_head")
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama", return_value="MCU"):
+            tally = label_shots.label_video(conn, vid, "m", force=True)
+        assert tally["skipped_format"] is None and tally["labelled"] == 2
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_other_formats_are_not_skipped():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn)
+        _analysis(conn, vid, "montage")
+        assert label_shots.skip_reason(conn, vid) is None
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_clip_with_no_analysis_is_not_skipped():
+    # "we never classified it" is not evidence that it is an interview, and
+    # refusing on missing data would quietly shrink the run.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn)
+        assert label_shots.skip_reason(conn, vid) is None
+    finally:
+        conn.close(); os.unlink(path)

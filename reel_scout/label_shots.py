@@ -40,6 +40,34 @@ from .shots import Shot, bind_frames_to_shots
 #: sentence is exactly what `parse_answer` refuses.
 _NUM_PREDICT = 12
 
+#: Formats where every shot is the same framing, so labelling each one costs
+#: real time and returns almost no information. An interview is the clear case:
+#: a locked-off MCU on a talking subject, held for the whole piece. The values
+#: are the normalized `analyses.style_format` tags (schema v5/v6), not a new
+#: vocabulary — the corpus already carries 20 clips tagged `talking_head`, and
+#: at ~3.7 s per frame that is half an hour spent confirming one answer.
+#:
+#: This is a default, not a rule about what is knowable: `--force` labels them
+#: anyway, because "mostly uniform" is not "uniform" and somebody may want the
+#: exceptions.
+SKIP_FORMATS = ("talking_head",)
+
+
+def skip_reason(conn, video_id: str) -> Optional[str]:
+    """Why this clip should not be labelled, or None to go ahead.
+
+    Reads the format the analysis already decided. A clip with no analysis is
+    not skipped — "we never classified it" is not evidence that it is an
+    interview, and refusing on missing data would quietly shrink the run.
+    """
+    row = conn.execute(
+        "SELECT style_format FROM analyses WHERE video_id = ?", (video_id,)
+    ).fetchone()
+    fmt = row["style_format"] if row else None
+    if fmt and fmt in SKIP_FORMATS:
+        return fmt
+    return None
+
 
 def representative_frames(conn, video_id: str) -> List[Tuple[Shot, Any]]:
     """(shot, its representative keyframe) for shots that have one."""
@@ -86,7 +114,8 @@ def classify_with_ollama(image_path: str, model: str,
 
 def label_video(conn, video_id: str, model: str,
                 base_url: Optional[str] = None,
-                supplied: Optional[Dict[str, str]] = None) -> Dict[str, int]:
+                supplied: Optional[Dict[str, str]] = None,
+                force: bool = False) -> Dict[str, Any]:
     """Label every shot that has a representative frame. Returns a tally.
 
     `supplied` maps a keyframe id (as a string, since it arrives from JSON) to a
@@ -97,7 +126,15 @@ def label_video(conn, video_id: str, model: str,
     # reported "39 refused" when every single frame file was simply unreadable
     # -- blaming the model for a path problem is the exact conflation this
     # library keeps paying for, and it took one run to build a fresh one.
-    tally = {"labelled": 0, "unknown": 0, "refused": 0, "skipped": 0, "missing": 0}
+    tally: Dict[str, Any] = {"labelled": 0, "unknown": 0, "refused": 0,
+                             "skipped": 0, "missing": 0, "skipped_format": None}
+    if not force:
+        fmt = skip_reason(conn, video_id)
+        if fmt:
+            # Reported, never silent: a run that quietly does nothing looks
+            # exactly like a run that found nothing to do.
+            tally["skipped_format"] = fmt
+            return tally
     for shot, frame in representative_frames(conn, video_id):
         code = None
         source = SOURCE_VLM
