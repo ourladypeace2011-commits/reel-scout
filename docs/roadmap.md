@@ -49,12 +49,12 @@ Phase 3  ████████████████████  ✅ Batch
 Phase 4  ████████████████████  ✅ Content Strategy Engine — 4A research ✅、4B inspire ✅、4C MCP 擴充 ✅、4D track ✅、4E 評分證據化 ✅、4F L3.5 OCR ✅
 Phase 5  ████████████████████  ✅ Tool Hygiene — LICENSE/README/CHANGELOG ✅、analyze-local ✅、yt-dlp 健壯性 ✅、CI ✅、config check ✅、**PyPI 上架 ✅（v1.2.0，Trusted Publishing 零 token）**
 Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
-Phase 6  ░░░░░░░░░░░░░░░░░░░░  📋 Shot-level 反解（per-shot 表 → 景別/運鏡 → 分鏡交付格式）— 提議中，見 §Phase 6
+Phase 6  ████░░░░░░░░░░░░░░░░  🔨 Shot-level 反解 — **6A 地基已落地**（`shots` 表，schema v14）；6B 景別／6C 運鏡／6D 交付格式待做
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**886 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v13**
+**目前版本**：**v1.3.1** ｜ **測試**：**903 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v14**
 
-> 基準寫清楚免得下一個人重數：`master`（含剛併入的 BPM near-miss #84）879 ＋ 本支 7 ＝ **886**。
+> 基準寫清楚免得下一個人重數：`master` 886 ＋ 本支 17 ＝ **903**。schema v13 → **v14**（新 `shots` 表）。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 
@@ -299,7 +299,11 @@ return len(_TS_PATTERN.findall(stderr))   # ← pts_time 全解出來了，只�
 
 ⚠️ 這不是新範圍，是 **§4E 沒做完的那一半**。§4E 的啟發來源自己寫著「crv Pro 的 `--motion` 產出 shot table（**per-shot duration** / cuts per minute / 節奏變化）」——當時偷了 cuts/min，**per-shot 那半沒偷**。
 
-- [ ] 保留剪點時間碼 → 新 `shots` 表（index / start / end / dur）。**「一顆鏡頭」第一次成為可定址的物件**——沒有這個單位，下面每一項都無處可掛
+- [x] ✅ **2026-09-02 落地**：保留剪點時間碼 → 新 `shots` 表（`idx` / `start_sec` / `end_sec` / `dur_sec`，schema v14）。**「一顆鏡頭」第一次成為可定址的物件。**
+  - `parse_cut_times()` 保留原本就已經算出來的東西；`shots_from_cuts()` 是純函式，不用 ffmpeg 就能單元測試
+  - 🔴 **一份邊界餵兩個輸出**：`compute_shot_table()` 一次 ffmpeg pass 同時回 metrics 與 spans，所以 `len(shots) == shot_count` **是結構上成立、不是靠兩邊講好**。把「退化邊界」從其中一邊濾掉而另一邊不濾，正是同一個資料庫裡兩張表開始靜默打架的方式 —— 所以**一個都不濾**：邊界落在 0.0 就產生一顆零長度的開場鏡並如實記錄，那是關於偵測器的資訊，不是該藏起來的雜訊
+  - 實檔驗證（三支 MV）：spans **50 / 100 / 170**，與 `shot_count` 完全一致，各段時長總和 **精確等於片長**（243.00 / 271.00 / 334.00 秒），無縫隙無重疊
+  - `save_shots` 是 replace 不是 append（`(video_id, idx)` unique）——第二次分析同一支片時 append 會留下兩份重疊的切分而沒有任何東西標示哪份是現行的
 - [ ] `keyframes` 綁 `shot_id` → 每顆鏡頭有代表幀
 - [ ] 逐字稿 segment 與 `ocr_captions` 依時間區間投影到 shot → **旁白與字卡自動分流到各自的鏡頭**（兩條原始訊號都已存在，這步是接線不是新演算法）
 
@@ -338,9 +342,9 @@ reel-scout 的 shot 是**別人的片**；分鏡工具的 `project.json` 是**�
 **6A 不是第一步。** 這個 repo 有紀錄的頭號失效模式是 completion-blind drift（§4E 的 0 列一次、0.0 分那列一次），而 Phase 6 會新增第三個可以安靜空掉的抽取層。所以順序是：
 
 1. ~~`stats` 報證據覆蓋率（v1.3 欠的 (b)）~~ ✅ 2026-09-01
-2. `db check-invalid --apply` 跑過既有語料
-3. 然後才開 `shots` 表 —— **這時它一落地就有人在量它有沒有真的長出資料**
-4. 6B → 6C → 6D/6E
+2. ~~`db check-invalid --apply` 跑過既有語料~~ ✅ 2026-09-02 —— 命中 **1 列**（4h11m 直播，0 keyframes / 55,521 字逐字稿 / 存 0.0 分）。標掉之後 `stats` 地板從 **0.0 回到 3.05**，而且**證據覆蓋率的「without measured」那行整個消失**：那支孤兒跟那筆假的 0.0 是同一列
+3. ~~開 `shots` 表~~ ✅ 2026-09-02 —— 排在 1、2 之後是刻意的，落地當下就有 `stats` 在量證據層有沒有真的長出資料
+4. **下一步：6B → 6C → 6D/6E**
 
 ---
 
@@ -392,4 +396,4 @@ reel-scout 的 shot 是**別人的片**；分鏡工具的 `project.json` 是**�
 | **v1.2** | ~~§4E 評分證據化 + §4F L3.5 OCR + Wave 3（3B patterns / 3A instaloader / 4B inspire / 4D track / 4C MCP 8-tools / 5A+5C docs）~~ ✅ 2026-07-19（PR #31/#32/#33，schema v9，228 tests；⚠️ pacing 評分行為改變，跨版本分數不可比）<br>🔴 **2026-07-20 更正：§4E「達成」僅指 code，語料上 `shot_metrics` 為 0 列、從沒真的跑過** → 證據層實質未生效，見 §4E 回填段 |
 | **v1.3** | ~~權重即時重算 + 中英介面切換~~ ✅ 2026-07-21（PR #35，v1.3.0 發布）|
 | **v1.3（原提議的證據層條件）** | 條件有兩個，**2026-09-01 實查：一過一沒過**。<br>✅ (a) `shot_metrics` 列數 > 0 —— **116 列**，遠超條件。<br>✅ (b) `stats` 能報出證據覆蓋率 —— **2026-09-01 補上**（`-- Evidence coverage --` ＋ `--json` ＋ `--csv` ＋ `--channel` scope）。<br>⚠️ 記一下這條怎麼欠下的：**版號當時已經走過去了（v1.3.1）而 (b) 沒跟上**——里程碑當條件用、版號當進度用，兩者脫鉤就會這樣。原句「這條沒過之前，任何評分 UI 精修都是在裝飾沒有地基的數字」現在兩半都有了：地基 116 列，儀表板也在了。 |
-| **v1.4（提議）** | **證據可見性 + shot-level 地基**，順序是刻意的（見 §Phase 6）：<br>✅ ① `stats` 報證據覆蓋率（補完 v1.3 的 (b)）—— 2026-09-01 done<br>② `db check-invalid --apply` 跑過既有語料（Unreleased 已有 code，庫裡那列 0.0 還在）<br>③ `shots` 表：保留剪點時間碼，讓「一顆鏡頭」第一次成為可定址的物件<br>條件：`stats` 能講出證據覆蓋率**且** `shots` 列數 > 0。**①② 排在 ③ 前面不是禮貌，是因為 ③ 會新增第三個可以安靜空掉的抽取層，而這個 repo 已經在同一個坑裡跌過兩次。** |
+| **v1.4（提議）** | **證據可見性 + shot-level 地基**，順序是刻意的（見 §Phase 6）：<br>✅ ① `stats` 報證據覆蓋率（補完 v1.3 的 (b)）—— 2026-09-01 done<br>② `db check-invalid --apply` 跑過既有語料（Unreleased 已有 code，庫裡那列 0.0 還在）<br>✅ ③ `shots` 表（schema v14）—— 2026-09-02 done<br>**條件已達成**：`stats` 講得出證據覆蓋率（114/114）**且** `shots` 有列（三支 MV 共 320 段實測）。**①② 排在 ③ 前面不是禮貌，是因為 ③ 新增了第三個可以安靜空掉的抽取層，而這個 repo 已經在同一個坑裡跌過兩次。** |

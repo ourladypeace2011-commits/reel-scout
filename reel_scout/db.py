@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -564,6 +564,47 @@ def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """A clip gains its shots — the spans between cuts (v13 -> v14).
+
+    `shot_metrics` has counted cuts since v7, but only the aggregate:
+    `shot_count`, `cuts_per_minute`, `avg_shot_sec`. The boundaries themselves
+    were resolved out of the ffmpeg dump on every run and then discarded by a
+    `len()`. So the library could say a clip has 50 shots and could not say
+    where any one of them starts — and "one shot" is the unit every downstream
+    question needs: which span is a close-up, which one holds still, which line
+    of VO belongs to which frame.
+
+    The table is additive and derived. Nothing reads it yet, existing rows are
+    untouched, and a clip analyzed before v14 simply has no shots until it is
+    re-analyzed. `(video_id, idx)` is unique so a re-run replaces rather than
+    doubles, which is the failure mode a plain append would have.
+
+    `shot_count` stays in `shot_metrics` rather than being recomputed from
+    here: they are derived from the same boundary list in the same pass
+    (`shots.compute_shot_table`), so they cannot disagree, and dropping the
+    aggregate would break every existing scorer path for no gain.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            idx             INTEGER,
+            start_sec       REAL,
+            end_sec         REAL,
+            dur_sec         REAL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shots_video ON shots(video_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shots_video_idx ON shots(video_id, idx);
+        """
+    )
+    conn.execute("UPDATE schema_version SET version = 14")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
     if conn is None:
         # `REEL_SCOUT_DATA` defaults to "./data", i.e. relative to wherever the
@@ -631,6 +672,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 12
         if current_ver < 13:
             _migrate_v12_to_v13(conn)
+            current_ver = 13
+        if current_ver < 14:
+            _migrate_v13_to_v14(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -684,6 +728,19 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
         );
 
         CREATE INDEX IF NOT EXISTS idx_ocr_captions_video ON ocr_captions(video_id);
+
+        CREATE TABLE IF NOT EXISTS shots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id        TEXT REFERENCES videos(id),
+            idx             INTEGER,
+            start_sec       REAL,
+            end_sec         REAL,
+            dur_sec         REAL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shots_video ON shots(video_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shots_video_idx ON shots(video_id, idx);
 
         CREATE TABLE IF NOT EXISTS performance (
             video_id        TEXT PRIMARY KEY REFERENCES videos(id),
@@ -1175,6 +1232,43 @@ def save_shot_metrics(
 def get_shot_metrics(conn: sqlite3.Connection, video_id: str) -> Optional[sqlite3.Row]:
     cur = conn.execute("SELECT * FROM shot_metrics WHERE video_id = ?", (video_id,))
     return cur.fetchone()
+
+
+def save_shots(conn: sqlite3.Connection, video_id: str, shots: List[Any]) -> int:
+    """Replace this clip's shot table. Returns the number of rows written.
+
+    Replace, not append: a second analyze pass measures the same clip again, and
+    appending would leave two overlapping partitions behind one `video_id` with
+    nothing marking which is current. The delete and the insert share one
+    transaction so a crash between them cannot leave the clip with no shots
+    while `shot_metrics` still claims a count.
+
+    An empty list clears the table for that clip and is a legitimate call: a
+    clip whose duration could not be probed has no partition, and saying so
+    beats leaving a stale one from a previous run.
+    """
+    rows = [
+        (video_id, s.index, s.start_sec, s.end_sec, s.dur_sec)
+        for s in shots
+    ]
+    with conn:
+        conn.execute("DELETE FROM shots WHERE video_id = ?", (video_id,))
+        if rows:
+            conn.executemany(
+                "INSERT INTO shots (video_id, idx, start_sec, end_sec, dur_sec) "
+                "VALUES (?,?,?,?,?)",
+                rows,
+            )
+    return len(rows)
+
+
+def get_shots(conn: sqlite3.Connection, video_id: str) -> List[sqlite3.Row]:
+    """This clip's shots in clip order. Empty list when none were stored —
+    which is the honest answer for anything analyzed before schema v14."""
+    cur = conn.execute(
+        "SELECT * FROM shots WHERE video_id = ? ORDER BY idx", (video_id,)
+    )
+    return cur.fetchall()
 
 
 # --- OCR Captions CRUD (§4F on-screen text / L3.5) ---
