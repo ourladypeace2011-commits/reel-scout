@@ -28,6 +28,7 @@ confident wrong value in a field meant to be trustworthy.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -119,19 +120,62 @@ SOURCE_DESCRIPTION = "description"
 UNKNOWN = "UNKNOWN"
 
 
+#: What each code means, in the only terms that decide it: how much of the frame
+#: the subject fills. Without these the model collapses the taxonomy onto the two
+#: labels it knows best — measured, ten ECUs where one belonged.
+_DEFINITIONS = {
+    "ECU": "part of a face or object fills the frame (eyes, hands, a detail)",
+    "CU": "head and a little shoulder",
+    "MCU": "head to chest",
+    "MS": "waist up",
+    "MLS": "knees up, some setting visible",
+    "LS": "the whole body, setting clearly visible",
+    "ELS": "the subject is small in a wide landscape or space",
+}
+
+
 def classification_prompt() -> str:
     """The constrained prompt, built from the vocabulary rather than repeating it.
 
-    Repeating the seven codes in a prompt string would create the third copy of
-    a list this module exists to keep at one.
+    🔴 **Each code carries its definition.** The first version listed the seven
+    codes with their English names and nothing else — and "MLS = medium long
+    shot" is not a definition, it is the same words in a longer form. Measured
+    on 24 frames from 18 clips, same model, same images:
+
+        codes + names only      ECU=10  CU=3  MCU=4   LS=5  UNKNOWN=2
+        codes + definitions     ECU=1   CU=3  MCU=13  LS=6  UNKNOWN=1
+
+    Nine of the ten "extreme close-ups" were head-and-chest shots. The model was
+    not failing to see; it was being asked to apply a taxonomy it had not been
+    given. Wall-clock was the same (259s vs 235s), so this was never a question
+    of spending more.
+
+    ⚠️ **What definitions did not fix**: `MS` / `MLS` / `ELS` stay near zero, so
+    roughly half the vocabulary is still unused. And on a stacked split-screen
+    frame the answer swung from `ECU` to `ELS` — wrong both times, in opposite
+    directions. That frame has no single subject-to-frame ratio, and no prompt
+    recovers one. Treat the labels as signal, not ground truth.
     """
-    options = ", ".join("%s = %s" % (c, SHOT_SIZE_NAMES[c]) for c in SHOT_SIZES)
+    lines = "\n".join("%-4s %s — %s" % (c, SHOT_SIZE_NAMES[c], _DEFINITIONS[c])
+                      for c in SHOT_SIZES)
     return (
-        "Classify the SHOT SIZE of this film frame. Answer with exactly one code "
-        "from this list and nothing else:\n%s\n"
-        "If the frame has no identifiable subject to judge framing against, "
-        "answer %s." % (options, UNKNOWN)
+        "Classify the SHOT SIZE of this film frame by how much of the frame the "
+        "main subject fills.\n\n%s\n\n"
+        "Judge by the SUBJECT-TO-FRAME RATIO, not by how close the camera feels.\n"
+        "If there is no identifiable subject (a title card, a graphic, black), "
+        "answer %s.\n"
+        "Answer with exactly one code and nothing else." % (lines, UNKNOWN)
     )
+
+
+def prompt_fingerprint() -> str:
+    """Short hash of the current prompt, stored beside every label it produced.
+
+    A version number somebody has to remember to bump goes stale silently; a
+    fingerprint of the actual text cannot. Same reasoning as
+    `translations.source_hash`.
+    """
+    return hashlib.sha256(classification_prompt().encode("utf-8")).hexdigest()[:16]
 
 
 def parse_answer(raw: Optional[str]) -> Optional[str]:

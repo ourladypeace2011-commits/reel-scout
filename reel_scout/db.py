@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -638,6 +638,7 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
             value           TEXT,
             source          TEXT,
             model           TEXT,
+            prompt_hash     TEXT,
             created_at      TEXT DEFAULT (datetime('now'))
         );
 
@@ -692,6 +693,28 @@ def _migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("UPDATE schema_version SET version = 16")
+    conn.commit()
+
+
+def _migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """A shot label records the prompt that produced it (v16 -> v17).
+
+    `source` and `model` were not enough. Measured on 24 frames from 18 clips:
+    the same model on the same images returned `ECU` **ten** times under a
+    prompt that listed the seven codes with their English names, and **once**
+    under a prompt that defined each one by subject-to-frame ratio. Nothing in
+    the stored rows distinguished the two runs — same source, same model, and a
+    distribution that had moved by a factor of ten.
+
+    A hash rather than a version string, for the same reason `translations`
+    stores one: a number somebody has to remember to bump goes stale silently,
+    a fingerprint of the actual prompt cannot. Existing rows get NULL, which
+    reads correctly as "produced before this was recorded".
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(shot_labels)")]
+    if "prompt_hash" not in cols:
+        conn.execute("ALTER TABLE shot_labels ADD COLUMN prompt_hash TEXT")
+    conn.execute("UPDATE schema_version SET version = 17")
     conn.commit()
 
 
@@ -771,6 +794,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 15
         if current_ver < 16:
             _migrate_v15_to_v16(conn)
+            current_ver = 16
+        if current_ver < 17:
+            _migrate_v16_to_v17(conn)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -846,6 +872,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             value           TEXT,
             source          TEXT,
             model           TEXT,
+            prompt_hash     TEXT,
             created_at      TEXT DEFAULT (datetime('now'))
         );
 
@@ -1401,17 +1428,21 @@ def get_shots(conn: sqlite3.Connection, video_id: str) -> List[sqlite3.Row]:
 
 def save_shot_label(conn: sqlite3.Connection, video_id: str, t_sec: float,
                     kind: str, value: Optional[str], source: str,
-                    model: Optional[str] = None) -> None:
+                    model: Optional[str] = None,
+                    prompt_hash: Optional[str] = None) -> None:
     """Upsert one label. Keyed by (video, kind, timestamp, source) so a VLM pass
-    and a human correction sit side by side instead of clobbering each other."""
+    and a human correction sit side by side instead of clobbering each other.
+
+    `prompt_hash` travels with the value because the prompt moves the answer as
+    much as the model does — measured, ten-to-one on the same images."""
     with conn:
         conn.execute(
-            "INSERT INTO shot_labels (video_id, t_sec, kind, value, source, model) "
-            "VALUES (?,?,?,?,?,?) "
+            "INSERT INTO shot_labels (video_id, t_sec, kind, value, source, model, "
+            "prompt_hash) VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(video_id, kind, t_sec, source) DO UPDATE SET "
             "value = excluded.value, model = excluded.model, "
-            "created_at = datetime('now')",
-            (video_id, float(t_sec), kind, value, source, model),
+            "prompt_hash = excluded.prompt_hash, created_at = datetime('now')",
+            (video_id, float(t_sec), kind, value, source, model, prompt_hash),
         )
 
 

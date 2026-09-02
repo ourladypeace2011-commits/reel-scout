@@ -49,7 +49,8 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config, db
-from .shot_size import (SOURCE_VLM, UNKNOWN, classification_prompt, parse_answer)
+from .shot_size import (SOURCE_VLM, UNKNOWN, classification_prompt,
+                         parse_answer, prompt_fingerprint)
 from .shots import Shot, bind_frames_to_shots
 from .utils import paths as media_paths
 
@@ -68,6 +69,17 @@ _NUM_PREDICT = 12
 #: anyway, because "mostly uniform" is not "uniform" and somebody may want the
 #: exceptions.
 SKIP_FORMATS = ("talking_head",)
+
+
+def stale_prompt(row: Any) -> bool:
+    """True when this label came from a different prompt than the current one.
+
+    NULL counts as stale: rows written before v17 have no fingerprint, and
+    "unknown provenance" is not the same claim as "current". The distribution
+    moved ten-to-one when the prompt changed, so a label whose prompt cannot be
+    established is not comparable to one whose can.
+    """
+    return (row["prompt_hash"] or "") != prompt_fingerprint()
 
 
 def skip_reason(conn, video_id: str) -> Optional[str]:
@@ -174,6 +186,10 @@ def label_video(conn, video_id: str, model: str,
         # The label hangs off the frame's timestamp, not the shot id: spans are
         # replaced on every re-analyze, timestamps are not.
         db.save_shot_label(conn, video_id, frame["timestamp_sec"],
-                           "shot_size", code, source, used_model)
+                           "shot_size", code, source, used_model,
+                           # Supplied labels did not come from our prompt, so
+                           # they carry no fingerprint — stamping one would
+                           # claim a provenance they do not have.
+                           prompt_fingerprint() if source == SOURCE_VLM else None)
         tally["unknown" if code == UNKNOWN else "labelled"] += 1
     return tally
