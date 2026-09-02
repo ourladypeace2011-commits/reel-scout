@@ -659,6 +659,17 @@ def _cmd_list(args) -> None:
 #: hidden — a silently shortened list is the thing this repo keeps paying for.
 _SHOW_MAX_SHOTS = 20
 
+#: VO and on-screen text are shown inline under their shot, so they get clipped
+#: rather than allowed to wrap and swallow the table.
+_SHOW_TEXT_WIDTH = 78
+
+
+def _clip(text: str, width: int) -> str:
+    """Truncate to `width`, saying so. A silently shortened line reads as the
+    whole line, which is how a reader ends up quoting half a sentence."""
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[:width - 1] + "…"
+
 
 def _cmd_show(args) -> None:
     from . import db
@@ -712,13 +723,32 @@ def _cmd_show(args) -> None:
     # persisted shot_id would point at a deleted row without anything raising.
     shot_rows = db.get_shots(conn, args.video_id)
     if shot_rows:
-        from .shots import Shot, bind_frames_to_shots
+        from .shots import Shot, bind_frames_to_shots, bind_spans_to_shots
         spans = [Shot(index=r["idx"], start_sec=r["start_sec"],
                       end_sec=r["end_sec"], dur_sec=r["dur_sec"]) for r in shot_rows]
         per_shot, unassigned = bind_frames_to_shots(spans, keyframes or [])
+
+        # VO is a span and can straddle a cut, so a line lands under every shot
+        # it covers: a storyboard cut asks "what is said over this shot", and
+        # filing a twelve-second line only under the shot it began in leaves the
+        # next two reading as silent — wrong information, not missing.
+        vo_segments = []
+        if transcript and transcript["segments_json"]:
+            try:
+                vo_segments = json.loads(transcript["segments_json"]) or []
+            except ValueError:
+                vo_segments = []
+        vo_by_shot, _vo_out = bind_spans_to_shots(spans, vo_segments)
+        # On-screen text is a point, same shape as a keyframe.
+        sup_by_shot, _sup_out = bind_frames_to_shots(
+            spans, db.get_ocr_captions(conn, args.video_id) or [])
+
         with_frames = sum(1 for s in per_shot if s.frames)
-        print("\n--- Shots (%d spans, %d with a keyframe) ---"
-              % (len(per_shot), with_frames))
+        with_vo = sum(1 for v in vo_by_shot if v)
+        with_sup = sum(1 for s in sup_by_shot if s.frames)
+        print("\n--- Shots (%d spans · %d with a keyframe · %d with VO · "
+              "%d with on-screen text) ---"
+              % (len(per_shot), with_frames, with_vo, with_sup))
         for s in per_shot[:_SHOW_MAX_SHOTS]:
             rep = s.representative
             rep_txt = ("frame id %d @ %.1fs" % (rep["id"], rep["timestamp_sec"])
@@ -726,6 +756,14 @@ def _cmd_show(args) -> None:
             print("  #%-3d %7.2f-%-7.2f (%5.2fs)  %s"
                   % (s.shot.index, s.shot.start_sec, s.shot.end_sec,
                      s.shot.dur_sec, rep_txt))
+            vo = " / ".join((seg.get("text") or "").strip()
+                            for seg in vo_by_shot[s.shot.index])
+            if vo.strip(" /"):
+                print("        vo : %s" % _clip(vo, _SHOW_TEXT_WIDTH))
+            sup = " / ".join((c["text"] or "").strip()
+                             for c in sup_by_shot[s.shot.index].frames)
+            if sup.strip(" /"):
+                print("        sup: %s" % _clip(sup, _SHOW_TEXT_WIDTH))
         if len(per_shot) > _SHOW_MAX_SHOTS:
             print("  ... %d more not shown" % (len(per_shot) - _SHOW_MAX_SHOTS))
         if unassigned:

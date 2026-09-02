@@ -239,3 +239,82 @@ def test_a_frame_with_an_unreadable_timestamp_is_unassigned_not_a_crash():
     sh = [shots.Shot(0, 0.0, 5.0, 5.0)]
     per, un = shots.bind_frames_to_shots(sh, [{"id": 1, "timestamp_sec": None}])
     assert len(un) == 1 and per[0].frames == []
+
+
+def _sp(t, a, b):
+    return {"t": t, "start": a, "end": b}
+
+
+def test_a_span_lands_under_every_shot_it_covers():
+    # The whole point of choosing overlap over start-only: a twelve-second line
+    # filed under one shot leaves the next two reading as silent, which is wrong
+    # information rather than missing information.
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0), shots.Shot(1, 5.0, 10.0, 5.0),
+          shots.Shot(2, 10.0, 15.0, 5.0)]
+    per, un = shots.bind_spans_to_shots(sh, [_sp("A", 1.0, 2.0), _sp("B", 4.0, 11.0)])
+    assert [x["t"] for x in per[0]] == ["A", "B"]
+    assert [x["t"] for x in per[1]] == ["B"]
+    assert [x["t"] for x in per[2]] == ["B"]
+    assert un == []
+
+
+def test_span_overlap_is_half_open_on_both_sides():
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0), shots.Shot(1, 5.0, 10.0, 5.0)]
+    # A line that ends exactly where the cut is does not bleed into the next shot.
+    per, _ = shots.bind_spans_to_shots(sh, [_sp("ends-on-cut", 1.0, 5.0)])
+    assert [x["t"] for x in per[0]] == ["ends-on-cut"]
+    assert per[1] == []
+    # ...and one that starts exactly on the cut does not reach back.
+    per, _ = shots.bind_spans_to_shots(sh, [_sp("starts-on-cut", 5.0, 7.0)])
+    assert per[0] == []
+    assert [x["t"] for x in per[1]] == ["starts-on-cut"]
+
+
+def test_zero_width_span_degrades_to_point_semantics():
+    # Subtitle cues really do come back with start == end.
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0), shots.Shot(1, 5.0, 10.0, 5.0)]
+    per, un = shots.bind_spans_to_shots(sh, [_sp("cue", 7.0, 7.0)])
+    assert [x["t"] for x in per[1]] == ["cue"]
+    assert un == []
+
+
+def test_zero_length_shot_receives_no_span_either():
+    # Matches bind_frames_to_shots: nothing was on screen for zero seconds, so
+    # nothing was said over it. Without the guard a straddling line would be
+    # filed under a span of no duration.
+    sh = shots.shots_from_cuts([0.0, 5.0], 10.0)
+    per, un = shots.bind_spans_to_shots(sh, [_sp("X", -1.0, 3.0)])
+    assert per[0] == []
+    assert [x["t"] for x in per[1]] == ["X"]
+    assert un == []
+
+
+def test_span_outside_every_shot_is_reported_not_swallowed():
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0)]
+    per, un = shots.bind_spans_to_shots(sh, [_sp("late", 90.0, 91.0)])
+    assert per[0] == []
+    assert [x["t"] for x in un] == ["late"]
+
+
+def test_reversed_span_is_normalized_not_dropped():
+    # It has to straddle a cut to have teeth: for a span sitting inside one
+    # shot the overlap test happens to hold either way round, so a test using
+    # one would pass with the normalization deleted.
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0), shots.Shot(1, 5.0, 10.0, 5.0)]
+    per, un = shots.bind_spans_to_shots(sh, [_sp("backwards", 9.0, 1.0)])
+    assert [x["t"] for x in per[0]] == ["backwards"]
+    assert [x["t"] for x in per[1]] == ["backwards"]
+    assert un == []
+
+
+def test_unreadable_span_is_unassigned_not_a_crash():
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0)]
+    per, un = shots.bind_spans_to_shots(sh, [{"start": None, "end": 2.0}])
+    assert per[0] == [] and len(un) == 1
+
+
+def test_custom_span_accessor():
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0)]
+    per, _ = shots.bind_spans_to_shots(
+        sh, [(1.0, 2.0)], span_of=lambda x: (x[0], x[1]))
+    assert per[0] == [(1.0, 2.0)]
