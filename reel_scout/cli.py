@@ -167,6 +167,9 @@ def main(argv: List[str] = None) -> None:
     p_size.add_argument("--base-url", default=None, help="ollama base URL")
     p_size.add_argument("--from-json", default=None,
                         help='Supply labels instead of asking a model: {"<keyframe id>": "CU"}')
+    p_size.add_argument("--force", action="store_true",
+                        help="Label even a format whose framing never changes "
+                             "(interviews are skipped by default)")
 
     p_export = sub.add_parser("export", help="Export analyses")
     p_export.add_argument("--format", choices=["json", "csv", "html", "bundle", "skeleton", "storyboard"],
@@ -708,7 +711,14 @@ def _cmd_shot_size(args) -> None:
         with open(args.from_json, encoding="utf-8") as f:
             supplied = {str(k): v for k, v in (json.load(f) or {}).items()}
     tally = label_video(conn, video_id, args.model,
-                        base_url=args.base_url, supplied=supplied)
+                        base_url=args.base_url, supplied=supplied,
+                        force=args.force)
+    if tally["skipped_format"]:
+        print("skipped: style_format=%s — every shot is the same framing, so "
+              "labelling each one buys almost nothing (use --force to override)"
+              % tally["skipped_format"])
+        conn.close()
+        return
     print("shot sizes: %d labelled, %d UNKNOWN, %d refused, %d skipped, %d missing"
           % (tally["labelled"], tally["unknown"], tally["refused"],
              tally["skipped"], tally["missing"]))
