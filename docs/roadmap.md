@@ -50,12 +50,12 @@ Phase 4  ████████████████████  ✅ Conte
 Phase 5  ████████████████████  ✅ Tool Hygiene — LICENSE/README/CHANGELOG ✅、analyze-local ✅、yt-dlp 健壯性 ✅、CI ✅、config check ✅、**PyPI 上架 ✅（v1.2.0，Trusted Publishing 零 token）**
 Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
 Phase 6  ██████████████████░░  ✅ Shot-level 反解 — **6A/6B/6D/6E 完成**；**6C 實測不可行、已封存並寫明原因**
-Phase 7  ████░░░░░░░░░░░░░░░░  🔨 語料健康度 — **7A `db health` 已落地**；7B 路徑正規化／7C 分鏡回程待做
+Phase 7  ██████████████░░░░░░  🔨 語料健康度 — **7A `db health` ＋ 7B 路徑解析已落地**；7C 分鏡回程待做
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**998 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v15**
+**目前版本**：**v1.3.1** ｜ **測試**：**1004 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v15**
 
-> 基準寫清楚免得下一個人重數：`master` 987 ＋ 本支 11 ＝ **998**。schema **v15**（`shots` ＋ `shot_labels`）。
+> 基準寫清楚免得下一個人重數：`master` 998 ＋ 本支 6 ＝ **1004**。schema **v15**（`shots` ＋ `shot_labels`）。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 
@@ -465,11 +465,37 @@ reel-scout 的 shot 是**別人的片**；分鏡工具的 `project.json` 是**�
 > ② `measurable` 沒把「媒體不在」算進去，於是一個沒人能關的缺口被列進了待辦。
 > **一個報出不存在的缺口的儀表板，會訓練人忽略它** —— 比沒有儀表板更糟。兩個都有變異守著。
 
-### 7B. 路徑正規化（待做）
+### 7B. 🔴 路徑：診斷是錯的，而錯的是讀取端不是資料 ✅ 2026-09-02
 
-101 支影片 ＋ 1,455 個 keyframe 存的是相對於「寫入它的那個 checkout」的路徑。
-今天絆倒三次（驗 shots、量 aspect、標景別），而且都是**靜默失敗**。
-`db normalize-paths` 現成，跑就好。
+**本節原本寫著**「101 支影片 ＋ 1,455 個 keyframe 存的是相對路徑，`db normalize-paths`
+現成，跑就好」。**那是錯的**，在按下去之前查出來。
+
+`normalize_media_paths` 的 docstring 自己就寫著：
+
+> Reads resolve both, so this is **cleanup rather than a prerequisite**.
+
+`reel_scout/utils/paths.py` 的 `resolve_media_path()` 依序試資料根、其父層、cwd、
+以及 videos 目錄的 basename —— **兩種形狀在任何工作目錄下都解得開**。實測從 `/tmp`：
+
+    paths.exists('./data/videos/x.mp4')  -> True
+    os.path.exists('./data/videos/x.mp4') -> False   ← 我用的就是這個
+
+⇒ **今天每一次歸咎於「相對路徑」的失敗，真正的原因都是我寫的 code 繞過了這個解析器。**
+四支全是同一個錯：`label_shots`（回報 39 refused，其實是讀不到）、`storyboard`
+（aspect 一律 unknown）、`health`（把健康的庫報成壞掉）、`backfill_shots`。
+
+- [x] 四支全部改走 `media_paths.exists()` / `resolve_media_path()`
+- [x] `health` 的 paths 那列**降級為僅供參考、不計入待辦** —— 讀取端兩種都解得開，
+      那是外觀不是缺口。**一個指著資料的儀表板，會讓下一個人去重寫 2,986 列白工**
+- [x] 從 `/tmp`（完全在任何 checkout 之外）實跑 `db health`，輸出與在 repo 內**完全一致**
+
+> 🔴 **這批修復的頭一輪測試完全沒有牙齒**：五個「改回裸 `os.path.exists`」的變異
+> **全部 MISSED**。原因是既有測試都用絕對路徑或 `patch("os.path.exists")`，
+> 在那個世界裡解析器與裸判斷行為相同。**要驗出差異，必須用真實的相對路徑 ＋ 不同的 cwd**
+> —— 也就是四支模組真正踩到的那個情境。補上之後七個變異全 CAUGHT。
+
+**教訓**（`feedback_grep_existing_cli_before_building` 的同族）：寫一個路徑判斷之前，
+先 grep 這個 repo 有沒有現成的路徑解析器。它有，而且註解裡就寫著它為什麼存在。
 
 ### 7C. 分鏡回程（待做）
 

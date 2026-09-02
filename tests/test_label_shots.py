@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 from unittest.mock import patch
 
-from reel_scout import db, label_shots
+from reel_scout import config, db, label_shots
 from reel_scout.shot_size import UNKNOWN
 from reel_scout.shots import Shot
 
@@ -271,5 +271,34 @@ def test_a_clip_with_no_analysis_is_not_skipped():
     try:
         vid = _seed(conn)
         assert label_shots.skip_reason(conn, vid) is None
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_relative_keyframe_path_is_resolved_not_read_raw(monkeypatch, tmp_path):
+    # The first real run of `shot-size` reported "39 refused" — every frame file
+    # was simply unreadable from that cwd, and the raw check could not tell.
+    conn, path = _temp_db()
+    root = str(tmp_path)
+    try:
+        kf_dir = os.path.join(root, "data", "keyframes")
+        os.makedirs(kf_dir)
+        open(os.path.join(kf_dir, "f11.jpg"), "wb").write(b"0")
+        vid = db.upsert_video(conn, "youtube", "p9", "https://y/p9", title="C")
+        db.save_shots(conn, vid, [Shot(0, 0.0, 5.0, 5.0)])
+        conn.execute(
+            "INSERT INTO keyframes (id, video_id, frame_index, timestamp_sec, "
+            "file_path, strategy) VALUES (?,?,?,?,?,?)",
+            (11, vid, 0, 2.0, "./data/keyframes/f11.jpg", "scene"))
+        conn.commit()
+        monkeypatch.setattr(config, "DATA_DIR", os.path.join(root, "data"))
+        elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        assert not os.path.exists("./data/keyframes/f11.jpg")
+        with patch.object(label_shots, "classify_with_ollama", return_value="CU") as ask:
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["missing"] == 0 and tally["labelled"] == 1
+        # And the model must be handed something openable, not the stored string.
+        assert os.path.isabs(ask.call_args[0][0])
     finally:
         conn.close(); os.unlink(path)
