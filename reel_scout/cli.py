@@ -654,6 +654,12 @@ def _cmd_list(args) -> None:
     conn.close()
 
 
+#: `show` prints every keyframe, but a 5-minute clip can carry 170 shots and a
+#: wall of spans buries the sections under it. Truncate, and say how many were
+#: hidden — a silently shortened list is the thing this repo keeps paying for.
+_SHOW_MAX_SHOTS = 20
+
+
 def _cmd_show(args) -> None:
     from . import db
 
@@ -700,6 +706,33 @@ def _cmd_show(args) -> None:
                 print(f"        {k['description'][:100]}")
         if described < len(keyframes):
             print("  * = no description yet")
+
+    # Shots (schema v14). The binding to keyframes is derived here rather than
+    # stored: `save_shots` replaces a clip's spans on every re-analyze, so a
+    # persisted shot_id would point at a deleted row without anything raising.
+    shot_rows = db.get_shots(conn, args.video_id)
+    if shot_rows:
+        from .shots import Shot, bind_frames_to_shots
+        spans = [Shot(index=r["idx"], start_sec=r["start_sec"],
+                      end_sec=r["end_sec"], dur_sec=r["dur_sec"]) for r in shot_rows]
+        per_shot, unassigned = bind_frames_to_shots(spans, keyframes or [])
+        with_frames = sum(1 for s in per_shot if s.frames)
+        print("\n--- Shots (%d spans, %d with a keyframe) ---"
+              % (len(per_shot), with_frames))
+        for s in per_shot[:_SHOW_MAX_SHOTS]:
+            rep = s.representative
+            rep_txt = ("frame id %d @ %.1fs" % (rep["id"], rep["timestamp_sec"])
+                       if rep is not None else "—")
+            print("  #%-3d %7.2f-%-7.2f (%5.2fs)  %s"
+                  % (s.shot.index, s.shot.start_sec, s.shot.end_sec,
+                     s.shot.dur_sec, rep_txt))
+        if len(per_shot) > _SHOW_MAX_SHOTS:
+            print("  ... %d more not shown" % (len(per_shot) - _SHOW_MAX_SHOTS))
+        if unassigned:
+            # Never silent: a frame outside every span means the frame table and
+            # the shot table were built from different measurements of the clip.
+            print("  !! %d keyframe(s) fall outside every span — frames and "
+                  "shots disagree about this clip" % len(unassigned))
 
     score = db.get_score(conn, args.video_id)
     if score:
