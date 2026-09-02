@@ -24,6 +24,11 @@ vibe off the analysis text — the exact model-dependent guess §4E existed to
 remove. The two print the same-looking number, so the difference is invisible at
 the point of use.
 
+`shot_table_videos` is the same question asked of the newest layer. `shots`
+(v14) is additive, so a clip analyzed before it has the cut *count* and no
+spans, and only a re-analyze fills them — a gap that would otherwise be
+invisible until somebody queried the table by hand.
+
 That gap cost six weeks in both directions. §4E was marked done in code while
 `shot_metrics` held zero rows, and nothing said so; then the corpus filled to
 116/117 and nothing said that either, so the roadmap carried a stale 🔴 until
@@ -154,12 +159,23 @@ def _evidence_coverage(
         "SELECT COUNT(DISTINCT o.video_id) FROM ocr_captions o "
         "JOIN videos v ON o.video_id = v.id WHERE 1=1" + where + _NOT_INVALID, params
     ).fetchone()[0]
+    # `shots` (schema v14) is the newest extraction layer and the one most
+    # likely to sit empty unnoticed: it is additive, so every clip analyzed
+    # before v14 has the cut *count* in shot_metrics and no spans at all, and
+    # nothing else in the tool would ever mention the difference. This repo has
+    # already lost six weeks twice to an extraction layer nobody was counting.
+    shot_table_videos = conn.execute(
+        "SELECT COUNT(DISTINCT sh.video_id) FROM shots sh "
+        "JOIN videos v ON sh.video_id = v.id WHERE 1=1" + where + _NOT_INVALID, params
+    ).fetchone()[0]
     return {
         "scored": scored,
         "scored_with_measured": scored_with_measured,
         "scored_without_measured": scored - scored_with_measured,
         "measured_videos": measured_videos,
         "on_screen_text_videos": ocr_videos,
+        "shot_table_videos": shot_table_videos,
+        "measured_without_shot_table": measured_videos - shot_table_videos,
     }
 
 
@@ -254,6 +270,12 @@ def format_stats(stats: Dict[str, Any]) -> str:
                          % ("without measured", ev["scored_without_measured"]))
         lines.append("%-20s %5d  videos" % ("on-screen text L3.5",
                                             ev["on_screen_text_videos"]))
+        lines.append("%-20s %5d  videos" % ("shot table (spans)",
+                                            ev.get("shot_table_videos", 0)))
+        gap = ev.get("measured_without_shot_table") or 0
+        if gap:
+            lines.append("%-20s %5d  <- have the cut count but not the spans; "
+                         "re-analyze to fill" % ("  missing spans", gap))
     elif ev:
         lines.append("\n-- Evidence coverage --")
         lines.append("no scored videos in scope")

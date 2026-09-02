@@ -475,3 +475,114 @@ def test_empty_corpus_evidence_block_does_not_crash_the_formatter():
     finally:
         conn.close()
         os.unlink(path)
+
+
+def test_evidence_coverage_counts_the_shot_span_layer_separately():
+    # `shots` (v14) is additive: a clip analyzed earlier has the cut count in
+    # shot_metrics and no spans. Without this line that gap is invisible.
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        ids = {pid: conn.execute(
+            "SELECT id FROM videos WHERE platform_id = ?", (pid,)).fetchone()["id"]
+            for pid in ("a", "b", "c")}
+        for vid in ids.values():
+            db.save_shot_metrics(conn, vid, shot_count=4, cuts_per_minute=2.0)
+        from reel_scout.shots import Shot
+        db.save_shots(conn, ids["a"], [Shot(0, 0.0, 5.0, 5.0)])
+
+        ev = stats.compute_stats(conn)["evidence_coverage"]
+        assert ev["measured_videos"] == 3
+        assert ev["shot_table_videos"] == 1
+        assert ev["measured_without_shot_table"] == 2
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_shot_table_coverage_counts_videos_not_spans():
+    # One clip with fifty spans is still one clip of coverage.
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        vid = conn.execute(
+            "SELECT id FROM videos WHERE platform_id = 'a'").fetchone()["id"]
+        from reel_scout.shots import Shot
+        db.save_shots(conn, vid, [Shot(i, float(i), float(i + 1), 1.0)
+                                  for i in range(50)])
+        ev = stats.compute_stats(conn)["evidence_coverage"]
+        assert ev["shot_table_videos"] == 1
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_shot_table_coverage_is_channel_scoped():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        from reel_scout.shots import Shot
+        for pid in ("a", "b"):
+            vid = conn.execute(
+                "SELECT id FROM videos WHERE platform_id = ?", (pid,)).fetchone()["id"]
+            db.save_shots(conn, vid, [Shot(0, 0.0, 1.0, 1.0)])
+        assert stats.compute_stats(conn, channel="Chan One")[
+            "evidence_coverage"]["shot_table_videos"] == 2
+        assert stats.compute_stats(conn, channel="Chan Two")[
+            "evidence_coverage"]["shot_table_videos"] == 0
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_formatter_names_the_missing_spans_and_the_remedy():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        ids = {pid: conn.execute(
+            "SELECT id FROM videos WHERE platform_id = ?", (pid,)).fetchone()["id"]
+            for pid in ("a", "b")}
+        for vid in ids.values():
+            db.save_shot_metrics(conn, vid, shot_count=4, cuts_per_minute=2.0)
+        from reel_scout.shots import Shot
+        db.save_shots(conn, ids["a"], [Shot(0, 0.0, 5.0, 5.0)])
+        text = stats.format_stats(stats.compute_stats(conn))
+        assert "shot table (spans)" in text
+        assert "missing spans" in text
+        # The remedy has to be on screen too: a bare gap count tells nobody
+        # what to do about it.
+        assert "re-analyze" in text
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_formatter_omits_the_gap_line_when_every_measured_clip_has_spans():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        from reel_scout.shots import Shot
+        for pid in ("a", "b", "c"):
+            vid = conn.execute(
+                "SELECT id FROM videos WHERE platform_id = ?", (pid,)).fetchone()["id"]
+            db.save_shot_metrics(conn, vid, shot_count=2, cuts_per_minute=1.0)
+            db.save_shots(conn, vid, [Shot(0, 0.0, 1.0, 1.0)])
+        text = stats.format_stats(stats.compute_stats(conn))
+        assert "shot table (spans)" in text
+        assert "missing spans" not in text
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_csv_carries_the_shot_table_rows():
+    conn, path = _fresh_db()
+    try:
+        _corpus(conn)
+        rows = stats.to_csv_rows(stats.compute_stats(conn))
+        ev_rows = {r[2]: r[3] for r in rows if r[0] == "evidence"}
+        assert ev_rows["shot_table_videos"] == 0
+        assert "measured_without_shot_table" in ev_rows
+    finally:
+        conn.close()
+        os.unlink(path)
