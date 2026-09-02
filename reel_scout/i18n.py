@@ -10,6 +10,30 @@ Each page renders English as the baseline text of every labelled element (so it
 still reads with JS off, and string-contains tests keep passing) and tags it with
 a `data-i18n` key. applyLang() swaps textContent client-side. Chinese is
 Traditional (zh-Hant) to match the rest of the toolchain.
+
+## Decoded VALUES: the original rule was too wide
+
+The first version refused to translate any model output, on the grounds that
+translating it "would mean re-running the model". That reason holds for free
+text — a summary, a hook line, a piece of reasoning — where the words are the
+model's own and a translation would be a different claim.
+
+It does not hold for the decoded enums. `content_structure`, `content_type`,
+`format`, `pacing`, `opening_type` and `cta_type` come from closed vocabularies
+written into the merge prompt (`analyze/merger.py`), and the model's job is to
+pick one. Showing the picked one in Chinese is a display mapping, exactly like
+the `row.*` and `dim.*` labels beside them — no model runs, and the stored value
+never changes.
+
+So the rule is now the narrower and more honest one:
+
+    closed vocabulary  -> translatable (VALUE_KEYS below)
+    free text          -> never       (opening_text, cta_text, summary,
+                                       reasoning, transcript, topics, titles)
+
+⚠️ A value that is not in `VALUE_KEYS` renders untouched in both languages. That
+is deliberate: a vocabulary that grows in the merge prompt and not here should
+show the raw value rather than a stale translation of a neighbouring one.
 """
 
 STRINGS = {
@@ -240,3 +264,57 @@ APPLY_JS = r"""
   applyLang(init);
 })();
 """
+
+
+#: Closed decoded vocabularies, exactly as `analyze/merger.py` defines them.
+#: Kept as a flat set of values (not per-field) because `none` is shared by
+#: `opening_type` and `cta_type` and means the same thing in both.
+VALUE_KEYS = (
+    # content_structure
+    "hook-body-cta", "problem-solution", "listicle", "story-arc", "raw-moment",
+    # content_type
+    "educational", "entertainment", "promotional", "review", "story", "news",
+    # style.format
+    "talking_head", "montage", "tutorial", "reaction", "skit", "vlog", "slideshow",
+    # style.pacing
+    "fast", "medium", "slow",
+    # hook.opening_type
+    "question", "statement", "visual", "music",
+    # hook.cta_type
+    "follow", "like", "comment", "link", "visit",
+    # shared by opening_type and cta_type
+    "none",
+)
+
+#: Traditional Chinese for each. English is the value itself, so the baseline
+#: render needs no lookup and the page still reads with JS off.
+_VALUE_ZH = {
+    "hook-body-cta": "鉤子-主體-CTA", "problem-solution": "問題-解方",
+    "listicle": "清單式", "story-arc": "故事弧", "raw-moment": "生活片段",
+    "educational": "教學", "entertainment": "娛樂", "promotional": "宣傳",
+    "review": "評測", "story": "故事", "news": "新聞",
+    "talking_head": "說話人", "montage": "剪輯串接", "tutorial": "教學示範",
+    "reaction": "反應", "skit": "短劇", "vlog": "vlog", "slideshow": "圖卡",
+    "fast": "快", "medium": "中", "slow": "慢",
+    "question": "提問", "statement": "陳述", "visual": "畫面", "music": "音樂",
+    "follow": "追蹤", "like": "按讚", "comment": "留言", "link": "連結",
+    "visit": "到店",
+    "none": "無",
+}
+
+
+def value_key(value):
+    """The i18n key for a decoded value, or None when it is not a known enum.
+
+    Returning None is what keeps free text out: a hook line or a title never
+    matches, so it is rendered raw and stays raw in both languages.
+    """
+    if not value:
+        return None
+    v = str(value).strip()
+    return ("val.%s" % v) if v in VALUE_KEYS else None
+
+
+for _v in VALUE_KEYS:
+    STRINGS["en"]["val.%s" % _v] = _v
+    STRINGS["zh"]["val.%s" % _v] = _VALUE_ZH[_v]

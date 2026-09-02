@@ -153,9 +153,13 @@ def render_video_section(view: Dict[str, Any], keyframe_src: KeyframeSrc) -> str
     parts.append('<h3 data-i18n="decoded">Decoded structure</h3><table class="kv">')
     for label, val in rows:
         if val:
-            # Only the label is translatable; the value is model output.
-            parts.append('<tr><th data-i18n="row.%s">%s</th><td>%s</td></tr>'
-                         % (_e(label), _e(label), _e(val)))
+            # The label is always translatable. The value is too when it comes
+            # from a closed vocabulary (`value_key` returns None for free text
+            # like a hook line, which then renders raw in both languages).
+            vk = i18n.value_key(val)
+            cell = ('<td data-i18n="%s">%s</td>' % (vk, _e(val))) if vk else "<td>%s</td>" % _e(val)
+            parts.append('<tr><th data-i18n="row.%s">%s</th>%s</tr>'
+                         % (_e(label), _e(label), cell))
     parts.append('</table>')
 
     if view["topics"]:
@@ -360,7 +364,9 @@ def render_index(views: List[Dict[str, Any]], href: Callable[[str], str]) -> str
         overall = ""
         if v["score"] and v["score"].get("overall") is not None:
             overall = '<span class="sc"> · %.1f</span>' % v["score"]["overall"]
-        struct = '<span class="sc"> · %s</span>' % _e(v["content_structure"]) if v["content_structure"] else ""
+        struct = (('<span class="sc" data-i18n="%s"> · %s</span>'
+                   % (i18n.value_key(v["content_structure"]) or "", _e(v["content_structure"])))
+                  if v["content_structure"] else "")
         # The score chip sits right here, so the caveat belongs beside it: a
         # reader comparing two rows should be able to see that one of the
         # numbers had less to work with.
@@ -587,7 +593,8 @@ ANNOTATE_JS = r"""
 def _row_meta(v: Dict[str, Any]) -> str:
     """The chips that follow a title: decoded structure, and the no-transcript
     caveat. Same content as the nav list, so the two surfaces read alike."""
-    struct = ('<span class="sc">%s</span>' % _e(v["content_structure"])
+    struct = (('<span class="sc" data-i18n="%s">%s</span>'
+               % (i18n.value_key(v["content_structure"]) or "", _e(v["content_structure"])))
               if v["content_structure"] else "")
     notx = ('<span class="sc warn"><span data-i18n="noTranscript">'
             '⚠ no transcript</span></span>') if not v.get("has_transcript") else ""

@@ -50,12 +50,12 @@ Phase 4  ████████████████████  ✅ Conte
 Phase 5  ████████████████████  ✅ Tool Hygiene — LICENSE/README/CHANGELOG ✅、analyze-local ✅、yt-dlp 健壯性 ✅、CI ✅、config check ✅、**PyPI 上架 ✅（v1.2.0，Trusted Publishing 零 token）**
 Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
 Phase 6  ██████████████████░░  ✅ Shot-level 反解 — **6A/6B/6D/6E 完成**；**6C 實測不可行、已封存並寫明原因**
-Phase 7  ████████████████████  ✅ 語料健康度 — **7A `db health`／7B 路徑解析／7C 分鏡回程 全部落地**
+Phase 7  ████████████████████  ✅ 語料健康度 — **7A `db health`／7B 路徑解析／7C 分鏡回程／7D 介面中文化補完**
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**1017 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v15**
+**目前版本**：**v1.3.1** ｜ **測試**：**1025 passing**（2026-09-02 於本支實跑）｜ **DB schema**：**v15**
 
-> 基準寫清楚免得下一個人重數：`master` 1004 ＋ 本支 13 ＝ **1017**。schema **v15**（`shots` ＋ `shot_labels`）。
+> 基準寫清楚免得下一個人重數：`master` 1017 ＋ 本支 8 ＝ **1025**。schema **v15**（`shots` ＋ `shot_labels`）。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 
@@ -520,6 +520,33 @@ reel-scout 的 shot 是**別人的片**；分鏡工具的 `project.json` 是**�
 - **忽略空白，但只忽略空白。** `vo` 多了一個逗號就是改動 —— 打那個逗號的人是有意的
 - **參考版從 DB 重建，不讀舊檔**：拿一份過期的匯出來比，會報出沒有人做過的改動
 - 沒有 `id` 的 cut 略過而不是崩掉
+
+### 7D. 介面中文化：原本那條規則太寬 ✅ 2026-09-02
+
+§4H 的 i18n 本身是滿的 —— 68 鍵、中英都有、頁面上沒有硬寫的英文（實測渲染後
+逐節點稽核，唯一未覆蓋的都是逐字稿／標題／頻道名，那些本來就不該翻）。
+
+**缺的是「解碼出來的值」。** 中文介面上到處是 `hook-body-cta`、`talking_head`、
+`neutral`、`educational` —— 而 `i18n.py` 檔頭明文寫著它們永不翻，理由是
+「翻它們等於要重跑模型」。
+
+🔴 **那個理由對自由文字成立，對封閉值域不成立。** `content_structure`／
+`content_type`／`format`／`pacing`／`opening_type`／`cta_type` 的值域是寫死在
+`analyze/merger.py` 的 prompt 裡的，模型的工作只是**從裡面挑一個**。
+把挑中的那個顯示成中文，跟旁邊 `row.*`／`dim.*` 標籤一樣是顯示層映射 ——
+不跑模型、不改存下來的值。
+
+規則因此收窄成更誠實的版本：
+
+    封閉值域  → 可翻（VALUE_KEYS，31 個值）
+    自由文字  → 永不翻（opening_text／cta_text／summary／reasoning／逐字稿／標題）
+
+- [x] `i18n.VALUE_KEYS` ＋ `value_key()`：不在表內的值回 `None` → **原樣渲染**。
+      值域在 merge prompt 長大而這裡沒跟上時，寧可顯示原文，也不要顯示鄰居的過期翻譯
+- [x] inspector／viewer 索引／viewer 單片／學生包 四個面全部掛上
+- [x] **英文仍是基線**：`STRINGS["en"]["val.x"] == "x"`，所以關掉 JS 頁面照樣讀得懂，
+      既有的 string-contains 測試也不會壞
+- [x] 一支測試**去讀 `merger.py`** 比對值域 —— 兩份清單靜默漂掉正是它要防的
 
 ---
 
