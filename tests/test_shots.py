@@ -159,3 +159,83 @@ def test_compute_shot_table_returns_none_when_the_pass_fails():
     with patch("reel_scout.shots.subprocess.run", return_value=fake), \
          patch("reel_scout.shots._probe_duration", return_value=60.0):
         assert shots.compute_shot_table("/fake.mp4") is None
+
+
+def test_boundaries_are_not_rounded_so_a_frame_on_the_cut_opens_the_new_shot():
+    # The regression this exists for: rounding a boundary to milliseconds moved
+    # it by up to 0.5ms, and a keyframe extracted *at* that cut carries the
+    # unrounded timestamp -- so half the frames landed in the shot the cut
+    # closes instead of the one it opens, split purely by rounding direction.
+    cut = 7.5075
+    sh = shots.shots_from_cuts([cut], 20.0)
+    assert sh[0].end_sec == cut and sh[1].start_sec == cut
+    assert shots.shot_index_for(cut, sh) == 1, "a frame on the cut opens the new shot"
+
+
+def test_every_scene_boundary_keeps_full_precision():
+    cuts = [7.5075, 13.680333, 19.561208, 31.948583]
+    sh = shots.shots_from_cuts(cuts, 60.0)
+    assert [s.start_sec for s in sh[1:]] == cuts
+    for c in cuts:
+        assert shots.shot_index_for(c, sh) is not None
+
+
+def test_shot_index_for_half_open_spans():
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0), shots.Shot(1, 5.0, 10.0, 5.0)]
+    assert shots.shot_index_for(0.0, sh) == 0
+    assert shots.shot_index_for(4.999, sh) == 0
+    assert shots.shot_index_for(5.0, sh) == 1      # the cut opens the next shot
+    assert shots.shot_index_for(10.0, sh) == 1     # last span is closed at its end
+    assert shots.shot_index_for(10.001, sh) is None
+    assert shots.shot_index_for(-1.0, sh) is None
+    assert shots.shot_index_for(1.0, []) is None
+
+
+def test_zero_length_shot_can_never_hold_a_frame():
+    # The honest record of a boundary at 0.0. Borrowing a neighbour's frame to
+    # make the table look tidy would be a lie about what was on screen.
+    sh = shots.shots_from_cuts([0.0, 5.0], 10.0)
+    per, un = shots.bind_frames_to_shots(sh, [{"id": 1, "timestamp_sec": 0.0}])
+    assert per[0].frames == [] and per[0].representative is None
+    assert [f["id"] for f in per[1].frames] == [1]
+    assert un == []
+
+
+def test_representative_is_nearest_the_midpoint_not_the_first_frame():
+    # The frame right after a cut is the one most likely to be a dissolve or
+    # motion blur -- the worst frame to represent the shot.
+    sh = [shots.Shot(0, 0.0, 10.0, 10.0)]
+    frames = [{"id": 1, "timestamp_sec": 0.1}, {"id": 2, "timestamp_sec": 4.9},
+              {"id": 3, "timestamp_sec": 9.9}]
+    per, _ = shots.bind_frames_to_shots(sh, frames)
+    assert per[0].representative["id"] == 2
+
+
+def test_representative_ties_go_to_the_earlier_frame():
+    sh = [shots.Shot(0, 0.0, 10.0, 10.0)]
+    frames = [{"id": 9, "timestamp_sec": 6.0}, {"id": 4, "timestamp_sec": 4.0}]
+    per, _ = shots.bind_frames_to_shots(sh, frames)
+    assert per[0].representative["id"] == 4
+
+
+def test_frames_outside_every_span_are_reported_not_swallowed():
+    # Means the frame table and the shot table were built from different
+    # measurements of the clip. Worth seeing.
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0)]
+    per, un = shots.bind_frames_to_shots(sh, [{"id": 1, "timestamp_sec": 99.0}])
+    assert per[0].frames == []
+    assert [f["id"] for f in un] == [1]
+
+
+def test_frames_are_returned_in_time_order_within_a_shot():
+    sh = [shots.Shot(0, 0.0, 10.0, 10.0)]
+    frames = [{"id": 3, "timestamp_sec": 8.0}, {"id": 1, "timestamp_sec": 1.0},
+              {"id": 2, "timestamp_sec": 4.0}]
+    per, _ = shots.bind_frames_to_shots(sh, frames)
+    assert [f["id"] for f in per[0].frames] == [1, 2, 3]
+
+
+def test_a_frame_with_an_unreadable_timestamp_is_unassigned_not_a_crash():
+    sh = [shots.Shot(0, 0.0, 5.0, 5.0)]
+    per, un = shots.bind_frames_to_shots(sh, [{"id": 1, "timestamp_sec": None}])
+    assert len(un) == 1 and per[0].frames == []
