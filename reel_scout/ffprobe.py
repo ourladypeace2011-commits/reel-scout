@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Optional
+from typing import Optional, Tuple
 
 from . import config
 from .utils.stderr import warn
@@ -71,6 +71,36 @@ def probe_video_codec(path: str) -> Optional[str]:
     # second video stream that was never there.
     name = result.stdout.strip().split(",")[0].strip()
     return name or None
+
+
+def probe_dimensions(path: str) -> Optional[Tuple[int, int]]:
+    """(width, height) of the first video stream, or ``None`` if unreadable.
+
+    ``None`` means "could not measure", never a default. A caller that treats a
+    failed probe as landscape will silently mis-shape every vertical clip.
+    """
+    cmd = [
+        config.FFMPEG_BIN.replace("ffmpeg", "ffprobe"),
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    parts = result.stdout.strip().split("\n")[0].split("x")
+    if len(parts) < 2:
+        return None
+    try:
+        w, h = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    return (w, h) if w > 0 and h > 0 else None
 
 
 def warn_if_not_apple_playable(path: str, label: str = "") -> Optional[str]:
