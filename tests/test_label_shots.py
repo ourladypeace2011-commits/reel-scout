@@ -366,20 +366,43 @@ def test_a_label_with_no_fingerprint_counts_as_stale():
     try:
         vid = _seed(conn, frames=((11, 2.0),))
         db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m")
-        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
-        assert label_shots.stale_prompt(row) is True
+        assert label_shots.stale_videos(conn) == [vid]
     finally:
         conn.close(); os.unlink(path)
 
 
-def test_a_label_from_the_current_prompt_is_not_stale():
+def test_a_label_from_the_current_prompt_leaves_the_clip_off_the_list():
     from reel_scout.shot_size import prompt_fingerprint
     conn, path = _temp_db()
     try:
         vid = _seed(conn, frames=((11, 2.0),))
         db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m",
                            prompt_fingerprint())
-        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
-        assert label_shots.stale_prompt(row) is False
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_supplied_label_never_puts_a_clip_on_the_re_run_list():
+    # It carries no fingerprint by design, so a naive "NULL is stale" query
+    # would queue every hand-supplied clip for a re-run that would overwrite
+    # nothing and cost a GPU pass each time.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "supplied", None)
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_the_re_run_list_names_each_clip_once():
+    # Several stale labels on one clip is still one `shot-size` invocation.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m")
+        db.save_shot_label(conn, vid, 5.0, "shot_size", "LS", "vlm", "m")
+        assert label_shots.stale_videos(conn) == [vid]
     finally:
         conn.close(); os.unlink(path)

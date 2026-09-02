@@ -31,7 +31,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from . import db, shot_size, validity
+from . import db, label_shots, shot_size, validity
 from .utils import paths as media_paths
 
 
@@ -123,9 +123,8 @@ def collect(conn) -> Dict[str, Any]:
         "labels_from_an_old_prompt": _one(
             conn,
             "SELECT COUNT(*) FROM shot_labels l JOIN videos v ON v.id = l.video_id "
-            "WHERE l.kind = 'shot_size' AND l.source = ? "
-            "AND COALESCE(l.prompt_hash, '') != ?" + _NOT_INVALID,
-            shot_size.SOURCE_VLM, shot_size.prompt_fingerprint()),
+            "WHERE " + label_shots.STALE_PROMPT_SQL + _NOT_INVALID,
+            *label_shots.stale_prompt_params()),
         "with_ocr": _one(
             conn, "SELECT COUNT(DISTINCT o.video_id) FROM ocr_captions o "
                   "JOIN videos v ON v.id = o.video_id WHERE 1=1" + _NOT_INVALID),
