@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config, db
 from .shot_size import (SOURCE_VLM, UNKNOWN, classification_prompt, parse_answer)
 from .shots import Shot, bind_frames_to_shots
+from .utils import paths as media_paths
 
 #: Enough for a code. A budget that allows a sentence invites one, and a
 #: sentence is exactly what `parse_answer` refuses.
@@ -162,10 +163,11 @@ def label_video(conn, video_id: str, model: str,
                 tally["skipped"] += 1
                 continue
         else:
-            if not os.path.exists(frame["file_path"]):
+            if not media_paths.exists(frame["file_path"]):
                 tally["missing"] += 1
                 continue
-            code = classify_with_ollama(frame["file_path"], model, base_url)
+            code = classify_with_ollama(
+                media_paths.resolve_media_path(frame["file_path"]), model, base_url)
             if code is None:
                 tally["refused"] += 1
                 continue

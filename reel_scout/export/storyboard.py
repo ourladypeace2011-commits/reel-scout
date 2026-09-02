@@ -46,6 +46,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from .. import db, ffprobe
+from ..utils import paths as media_paths
 from ..shot_size import normalize as normalize_shot_size
 from ..shots import Shot, bind_frames_to_shots, bind_spans_to_shots
 
@@ -67,9 +68,9 @@ def _aspect(file_path: Optional[str]) -> Optional[str]:
     documented default of 16:9. That default is wrong for a vertical reel, so
     the caller warns rather than letting the omission pass as a decision.
     """
-    if not file_path or not os.path.exists(file_path):
+    if not media_paths.exists(file_path):
         return None
-    dims = ffprobe.probe_dimensions(file_path)
+    dims = ffprobe.probe_dimensions(media_paths.resolve_media_path(file_path))
     if not dims:
         return None
     w, h = dims

@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 
 from . import db
 from .shots import compute_shot_table
+from .utils import paths as media_paths
 
 
 def candidates(conn) -> list:
@@ -42,10 +43,12 @@ def backfill(conn, dry_run: bool = False, limit: Optional[int] = None,
         rows = rows[:limit]
     out = {"candidates": total, "filled": 0, "skipped_no_media": 0, "failed": 0}
     for i, r in enumerate(rows, 1):
-        path = r["file_path"]
-        if not path or not os.path.exists(path):
+        # Resolved, not read raw: the stored form may be relative to whichever
+        # checkout wrote it, and `resolve_media_path` already handles both.
+        if not media_paths.exists(r["file_path"]):
             out["skipped_no_media"] += 1
             continue
+        path = media_paths.resolve_media_path(r["file_path"])
         if dry_run:
             out["filled"] += 1
             continue

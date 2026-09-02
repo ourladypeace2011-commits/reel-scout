@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 from unittest.mock import patch
 
-from reel_scout import db, health, validity
+from reel_scout import config, db, health, validity
 from reel_scout.shots import Shot
 
 
@@ -105,12 +105,18 @@ def test_a_filled_shot_table_closes_the_gap():
         conn.close(); os.unlink(path)
 
 
-def test_relative_paths_are_actionable_and_name_the_command():
+def test_relative_paths_are_reported_but_never_actionable():
+    # `utils.paths.resolve_media_path` reads both forms from any cwd, so a mixed
+    # library is untidy rather than broken. Four modules reported a healthy
+    # library as broken in one day by calling `os.path.exists` on the stored
+    # string instead — the gap was in the readers, and a dashboard pointing at
+    # the data would have sent the next person to rewrite 2,986 rows for nothing.
     conn, path = _temp_db()
     try:
         _clip(conn, "a", path="./data/videos/a.mp4")
         r = _rows(conn)["paths"]
-        assert r["actionable"] and "normalize-paths" in r["fix"]
+        assert not r["actionable"]
+        assert "resolve both" in r["detail"]
     finally:
         conn.close(); os.unlink(path)
 
@@ -156,10 +162,67 @@ def test_report_says_when_nothing_is_waiting():
 def test_report_counts_only_the_actionable_gaps():
     conn, path = _temp_db()
     try:
-        _clip(conn, "a", path="/gone.mp4")          # not actionable
-        _clip(conn, "b", path="./data/videos/b.mp4")  # actionable (relative)
-        h = health.collect(conn)
-        text = health.format_report(h, health.findings(h))
+        _clip(conn, "a", path="/gone.mp4")   # media gone — never actionable
+        with patch.object(validity, "scan", return_value=[{"id": _clip(conn, "b")}]):
+            h = health.collect(conn)
+            text = health.format_report(h, health.findings(h))
         assert "1 gap(s)" in text
+    finally:
+        conn.close(); os.unlink(path)
+
+
+# --- the resolver, tested where it actually differs -------------------------
+#
+# Every test above uses absolute paths or patches `os.path.exists`, and in that
+# world the resolver and the raw call agree — which is why five mutations that
+# reverted the resolver were all MISSED on the first pass. The difference only
+# shows with a *relative* stored path read from a *different* working
+# directory, which is exactly the situation four modules got wrong in one day.
+
+def _data_root_clip(conn, tmp_root, pid="rel"):
+    """A clip whose media really exists, stored the legacy `./data/...` way."""
+    videos = os.path.join(tmp_root, "data", "videos")
+    os.makedirs(videos, exist_ok=True)
+    real = os.path.join(videos, "%s.mp4" % pid)
+    with open(real, "wb") as f:
+        f.write(b"0")
+    vid = db.upsert_video(conn, "youtube", pid, "https://y/%s" % pid, title=pid)
+    conn.execute(
+        "UPDATE videos SET status='analyzed', duration_sec=10.0, file_path=? WHERE id=?",
+        ("./data/videos/%s.mp4" % pid, vid))
+    conn.commit()
+    return vid
+
+
+def test_a_relative_path_resolves_from_an_unrelated_cwd(monkeypatch, tmp_path):
+    # The whole point: `os.path.exists("./data/videos/x.mp4")` is False from
+    # anywhere but the checkout that wrote it, and the library is full of them.
+    conn, path = _temp_db()
+    root = str(tmp_path)
+    try:
+        _data_root_clip(conn, root)
+        monkeypatch.setattr(config, "DATA_DIR", os.path.join(root, "data"))
+        elsewhere = tmp_path / "somewhere-else"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        assert not os.path.exists("./data/videos/rel.mp4"), "cwd must not resolve it"
+        h = health.collect(conn)
+        assert h["missing_media"] == 0, "the resolver has to find it"
+        assert h["measurable"] == 1, "and it has to count as measurable"
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_paths_row_is_not_actionable_even_when_every_path_is_relative():
+    conn, path = _temp_db()
+    try:
+        _clip(conn, "a", path="./data/videos/a.mp4")
+        _clip(conn, "b", path="./data/videos/b.mp4")
+        rows = health.findings(health.collect(conn))
+        paths_row = {r["label"]: r for r in rows}["paths"]
+        assert paths_row["actionable"] is False
+        # And it must not inflate the "waiting on a command" count either.
+        assert sum(1 for r in rows if r["actionable"]) == 0
     finally:
         conn.close(); os.unlink(path)

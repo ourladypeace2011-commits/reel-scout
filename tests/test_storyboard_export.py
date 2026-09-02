@@ -5,8 +5,9 @@ import json
 import os
 import sqlite3
 import tempfile
+from unittest.mock import patch
 
-from reel_scout import db
+from reel_scout import config, db
 from reel_scout.export import storyboard
 from reel_scout.export.storyboard import REF_PREFIX, build_project, export_storyboard
 from reel_scout.shots import Shot
@@ -156,3 +157,30 @@ def test_export_writes_valid_json_for_a_clip_with_shots():
 def test_timecode_format_is_readable_against_a_scrub_bar():
     assert storyboard._tc(0) == "0:00.0"
     assert storyboard._tc(75.25) == "1:15.2"
+
+
+def test_aspect_resolves_a_relative_media_path(monkeypatch, tmp_path):
+    # Stored paths are mostly `./data/videos/...`, which exists only in the
+    # checkout that wrote them. Reading that raw made every export warn "aspect
+    # unknown (media missing)" and silently fall back to the app's 16:9 default
+    # — wrong for a vertical clip, and nothing on screen said the check itself
+    # had failed rather than the media being gone.
+    root = str(tmp_path)
+    videos = os.path.join(root, "data", "videos")
+    os.makedirs(videos)
+    open(os.path.join(videos, "v.mp4"), "wb").write(b"0")
+    monkeypatch.setattr(config, "DATA_DIR", os.path.join(root, "data"))
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert not os.path.exists("./data/videos/v.mp4")
+
+    with patch("reel_scout.export.storyboard.ffprobe.probe_dimensions",
+               return_value=(1080, 1920)) as probe:
+        assert storyboard._aspect("./data/videos/v.mp4") == "9:16"
+    # ffprobe has to be handed something openable, not the stored string.
+    assert os.path.isabs(probe.call_args[0][0])
+
+
+def test_aspect_is_none_when_the_media_really_is_gone():
+    assert storyboard._aspect("/definitely/not/here.mp4") is None
+    assert storyboard._aspect(None) is None

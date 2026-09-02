@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 from unittest.mock import patch
 
-from reel_scout import backfill_shots, db
+from reel_scout import backfill_shots, config, db
 from reel_scout.shots import Shot, ShotMetrics
 
 
@@ -119,5 +119,27 @@ def test_rerunning_is_a_no_op_because_filled_clips_leave_the_candidate_set():
             backfill_shots.backfill(conn)
             second = backfill_shots.backfill(conn)
         assert second["candidates"] == 0 and second["filled"] == 0
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_relative_path_is_resolved_not_read_raw(monkeypatch, tmp_path):
+    # `os.path.exists("./data/videos/x.mp4")` is False from anywhere but the
+    # checkout that wrote it, and most of the real library is stored that way.
+    # Reading it raw reported 111 fillable clips as media-gone.
+    conn, path = _temp_db()
+    root = str(tmp_path)
+    try:
+        videos = os.path.join(root, "data", "videos")
+        os.makedirs(videos)
+        open(os.path.join(videos, "a.mp4"), "wb").write(b"0")
+        _clip(conn, "a", path="./data/videos/a.mp4")
+        monkeypatch.setattr(config, "DATA_DIR", os.path.join(root, "data"))
+        elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        assert not os.path.exists("./data/videos/a.mp4")
+        with patch.object(backfill_shots, "compute_shot_table", return_value=TABLE):
+            r = backfill_shots.backfill(conn)
+        assert r["skipped_no_media"] == 0 and r["filled"] == 1
     finally:
         conn.close(); os.unlink(path)

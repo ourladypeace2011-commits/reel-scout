@@ -32,6 +32,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from . import db, validity
+from .utils import paths as media_paths
 
 
 #: Rows already marked invalid are excluded from every count that describes
@@ -54,7 +55,12 @@ def collect(conn) -> Dict[str, Any]:
 
     missing_media = 0
     for r in conn.execute("SELECT v.file_path FROM videos v WHERE 1=1" + _NOT_INVALID):
-        if not r[0] or not os.path.exists(r[0]):
+        # Through the resolver, never `os.path.exists` on the stored string: a
+        # path written as `./data/...` by a process running in the repo root
+        # does not exist relative to anywhere else, and `resolve_media_path`
+        # is the thing that already knows that. Reading it raw is how four
+        # separate modules reported a healthy library as broken in one day.
+        if not media_paths.exists(r[0]):
             missing_media += 1
 
     # Only clips whose media is here can gain a shot table, so the denominator
@@ -68,7 +74,7 @@ def collect(conn) -> Dict[str, Any]:
     for r in conn.execute(
             "SELECT v.file_path FROM videos v WHERE v.status = 'analyzed' "
             "AND v.duration_sec > 0" + _NOT_INVALID):
-        if r[0] and os.path.exists(r[0]):
+        if media_paths.exists(r[0]):
             measurable += 1
     with_shots = _one(
         conn, "SELECT COUNT(DISTINCT s.video_id) FROM shots s "
@@ -142,11 +148,20 @@ def findings(h: Dict[str, Any]) -> List[Dict[str, Any]]:
         "%d present, %d gone" % (h["videos"] - h["missing_media"], h["missing_media"]),
         "re-crawl to restore" if h["missing_media"] else None)
 
+    # Informational, never actionable. `utils.paths.resolve_media_path` reads
+    # both the relative and the absolute form from any working directory, so a
+    # mixed library is untidy, not broken. This row was actionable in the first
+    # version and it was wrong for the most instructive reason available: four
+    # modules had reported a healthy library as broken that same day, and every
+    # one of them had bypassed that resolver and called `os.path.exists` on the
+    # stored string. The gap was in the readers, not in the data — and a
+    # dashboard that points at the data would have sent the next person to
+    # rewrite 2,986 rows for nothing.
     rel = h["relative_video_paths"] + h["relative_keyframe_paths"]
-    add("paths", rel == 0,
-        "%d video + %d keyframe path(s) relative to the writing checkout"
+    add("paths", True,
+        "%d video + %d keyframe path(s) stored relative (reads resolve both)"
         % (h["relative_video_paths"], h["relative_keyframe_paths"]),
-        "db normalize-paths" if rel else None, actionable=rel > 0)
+        "db normalize-paths tidies them; nothing depends on it" if rel else None)
 
     add("invalid rows", h["invalid_unmarked"] == 0,
         "%d marked, %d matching but unmarked"
