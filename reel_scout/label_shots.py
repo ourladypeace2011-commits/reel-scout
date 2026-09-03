@@ -35,6 +35,12 @@ answer caps output at a dozen tokens, where a full description does not.
   to "how much of the frame does the subject fill". `ELS` came back zero times
   and `MLS` once, so in practice the model uses about half the vocabulary.
 
+* The model sometimes emits a code that does not exist. Measured 2026-09-03 on
+  `560dfe9c082f7e87`: `EUC`, a transposition of `ECU`, returned identically on
+  every run because temperature is 0. `parse_answer` refuses it, and
+  **deliberately does not repair it** — a vocabulary that quietly accepts near
+  misses is how a confident wrong value gets into a column meant to be trusted.
+
 ⇒ **Use these labels as a signal, never as ground truth.** A storyboard cut
 that carries one is a starting point for the person editing it, which is what
 the export's `REF:` marking already assumes.
@@ -95,6 +101,23 @@ def stale_prompt_params() -> tuple:
     return (SOURCE_VLM, prompt_fingerprint())
 
 
+def drop_superseded_label(conn, video_id: str, t_sec: float) -> int:
+    """Delete this frame's label if it came from a prompt we no longer use.
+
+    Narrow on purpose, and every part of the narrowness is load-bearing: only
+    this one frame, only `vlm` rows, and only when the fingerprint is not the
+    current one. A label written by the current prompt is never touched, so a
+    run that finds nothing superseded deletes nothing.
+    """
+    cur = conn.execute(
+        "DELETE FROM shot_labels WHERE id IN ("
+        "  SELECT l.id FROM shot_labels l"
+        "  WHERE l.video_id = ? AND l.t_sec = ? AND " + STALE_PROMPT_SQL + ")",
+        (video_id, t_sec) + stale_prompt_params())
+    conn.commit()
+    return cur.rowcount
+
+
 def stale_videos(conn) -> List[str]:
     """Clips holding at least one label from a superseded prompt, id order.
 
@@ -134,19 +157,37 @@ def representative_frames(conn, video_id: str) -> List[Tuple[Shot, Any]]:
     return [(s.shot, s.representative) for s in per if s.representative is not None]
 
 
-def classify_with_ollama(image_path: str, model: str,
-                         base_url: Optional[str] = None) -> Optional[str]:
-    """One frame, one code. None on a refusal, a malformed answer, or a failure.
+#: Why a frame produced no code. The distinction is not cosmetic: only
+#: `UNPARSEABLE` is deterministic. A model that answers outside the vocabulary
+#: answers the same way on a retry (temperature is 0); ollama being down does
+#: not.
+#:
+#: 🔴 **These were one value once, and that was a real bug.** The first version
+#: returned bare `None` for all four causes and the caller counted them all as
+#: "refused" — so an ollama outage and a model that cannot spell were the same
+#: line of output, and any convergence logic built on top would have treated an
+#: outage as a permanent verdict. Found 2026-09-03 while working out why one
+#: clip would not converge: the answer was `EUC`, a transposition of `ECU`.
+REFUSAL_UNPARSEABLE = "unparseable"
+REFUSAL_UNREACHABLE = "unreachable"
+REFUSAL_UNREADABLE = "unreadable"
 
-    None is not an error state the caller should retry blindly — a model that
-    will not follow the constraint will not follow it the second time either.
+
+def classify_with_ollama(image_path: str, model: str,
+                         base_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    """One frame, one code. Returns `(code, refusal)`; exactly one is None.
+
+    The refusal says whether asking again could ever produce a different
+    answer. `REFUSAL_UNPARSEABLE` means no — the constraint was stated and not
+    followed, at temperature 0. The other two are environment, and an
+    environment can be fixed.
     """
     url = (base_url or getattr(config, "OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
     try:
         with open(image_path, "rb") as f:
             img = base64.b64encode(f.read()).decode("utf-8")
     except OSError:
-        return None
+        return None, REFUSAL_UNREADABLE
     body = json.dumps({
         "model": model,
         "prompt": classification_prompt(),
@@ -163,8 +204,9 @@ def classify_with_ollama(image_path: str, model: str,
         with urllib.request.urlopen(req, timeout=300) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
-        return None
-    return parse_answer(payload.get("response"))
+        return None, REFUSAL_UNREACHABLE
+    code = parse_answer(payload.get("response"))
+    return (code, None) if code else (None, REFUSAL_UNPARSEABLE)
 
 
 def label_video(conn, video_id: str, model: str,
@@ -182,6 +224,7 @@ def label_video(conn, video_id: str, model: str,
     # -- blaming the model for a path problem is the exact conflation this
     # library keeps paying for, and it took one run to build a fresh one.
     tally: Dict[str, Any] = {"labelled": 0, "unknown": 0, "refused": 0,
+                             "unreachable": 0, "dropped": 0,
                              "skipped": 0, "missing": 0, "skipped_format": None}
     if not force:
         fmt = skip_reason(conn, video_id)
@@ -204,10 +247,24 @@ def label_video(conn, video_id: str, model: str,
             if not media_paths.exists(frame["file_path"]):
                 tally["missing"] += 1
                 continue
-            code = classify_with_ollama(
+            code, refusal = classify_with_ollama(
                 media_paths.resolve_media_path(frame["file_path"]), model, base_url)
             if code is None:
+                if refusal == REFUSAL_UNREACHABLE:
+                    # Environment, not verdict. Leave whatever is already
+                    # stored alone and let the next run decide.
+                    tally["unreachable"] += 1
+                    continue
                 tally["refused"] += 1
+                # A frame the current prompt cannot answer, still holding an
+                # answer from a prompt we have retired. Keeping it would leave
+                # the clip permanently on the re-run list with a remedy that
+                # cannot work -- exactly the "cannot" that `db health` exists
+                # to separate from "not yet". Saying nothing about this frame
+                # is more honest than keeping a reading from a retired
+                # instrument, so the superseded row goes.
+                tally["dropped"] += drop_superseded_label(
+                    conn, video_id, frame["timestamp_sec"])
                 continue
         # The label hangs off the frame's timestamp, not the shot id: spans are
         # replaced on every re-analyze, timestamps are not.
