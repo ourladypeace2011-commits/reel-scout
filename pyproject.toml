@@ -47,6 +47,11 @@ vector = ["lancedb>=0.4.0", "chromadb>=0.4.0"]
 diarize = ["speaker-align[pyannote]"]
 instagram = ["instaloader>=4.10"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=9.0"]
+# Camera movement (§6C) reads H.264 motion vectors, which only the decoder can
+# hand over -- ffprobe reports that the side data exists but never its values.
+# PyAV is already present for anyone on [whisper] (faster-whisper depends on
+# it), so this extra costs those installs nothing.
+motion = ["av>=12", "numpy>=1.21.0"]
 # numpy is the audio detector's own dependency, not a test helper: `analyze()`
 # cannot run without it. Until `tests/test_audio_sfx_floor.py` the suite only
 # reached the pure-python halves of that module, so CI never needed it — and a

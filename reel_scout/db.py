@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -696,6 +696,41 @@ def _migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """Camera movement per shot, measured from motion vectors (v17 -> v18).
+
+    Its own table rather than a `shot_labels` row, because it is not a label:
+    no model answered, no prompt produced it. It is a measurement, like
+    `shots`, and it carries the two numbers the class was derived from --
+    `speed` and `agreement` -- so a reader can see why a shot was called what
+    it was called. A class with no numbers under it is the shape §4E spent a
+    page warning about.
+
+    🔴 **Keyed on `t_sec`, never on `shots.id`.** `save_shots` replaces the span
+    rows on every re-analyze, so anything hanging off a shot id disappears with
+    them, silently. The same rule `shot_labels` was built on: seven seconds in
+    is still seven seconds in.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS shot_motion (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id    TEXT NOT NULL REFERENCES videos(id),
+            t_sec       REAL NOT NULL,
+            dx          REAL,
+            dy          REAL,
+            speed       REAL,
+            agreement   REAL,
+            frames      INTEGER NOT NULL,
+            movement    TEXT NOT NULL,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(video_id, t_sec)
+        );
+        CREATE INDEX IF NOT EXISTS idx_shot_motion_video ON shot_motion(video_id);
+    """)
+    conn.execute("UPDATE schema_version SET version = 18")
+    conn.commit()
+
+
 def _migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
     """A shot label records the prompt that produced it (v16 -> v17).
 
@@ -797,6 +832,28 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 16
         if current_ver < 17:
             _migrate_v16_to_v17(conn)
+            current_ver = 17
+        if current_ver < 18:
+            _migrate_v17_to_v18(conn)
+    # Fresh installs never run the ladder, so every table added by a migration
+    # also needs a CREATE IF NOT EXISTS here -- the same reason audio_events
+    # below is repeated.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS shot_motion (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id    TEXT NOT NULL REFERENCES videos(id),
+            t_sec       REAL NOT NULL,
+            dx          REAL,
+            dy          REAL,
+            speed       REAL,
+            agreement   REAL,
+            frames      INTEGER NOT NULL,
+            movement    TEXT NOT NULL,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(video_id, t_sec)
+        );
+        CREATE INDEX IF NOT EXISTS idx_shot_motion_video ON shot_motion(video_id);
+    """)
     # Always ensure audio_events table exists for fresh installs
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS audio_events (
@@ -1425,6 +1482,33 @@ def get_shots(conn: sqlite3.Connection, video_id: str) -> List[sqlite3.Row]:
         "SELECT * FROM shots WHERE video_id = ? ORDER BY idx", (video_id,)
     )
     return cur.fetchall()
+
+def save_shot_motion(conn: sqlite3.Connection, video_id: str,
+                     rows: list) -> int:
+    """Replace this clip's motion rows with `rows`, returning how many landed.
+
+    Replace, not append: motion is derived wholly from the current shot spans,
+    so a re-run with different spans must not leave the old rows beside the new
+    ones. `shot_labels` appends because a label can come from several sources
+    that coexist; this has exactly one source.
+    """
+    conn.execute("DELETE FROM shot_motion WHERE video_id = ?", (video_id,))
+    for r in rows:
+        conn.execute(
+            "INSERT INTO shot_motion (video_id, t_sec, dx, dy, speed, "
+            "agreement, frames, movement) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (video_id, r["t_sec"], r["dx"], r["dy"], r["speed"],
+             r["agreement"], r["frames"], r["movement"]))
+    conn.commit()
+    return len(rows)
+
+
+def get_shot_motion(conn: sqlite3.Connection, video_id: str) -> list:
+    """This clip's motion rows in time order."""
+    return conn.execute(
+        "SELECT * FROM shot_motion WHERE video_id = ? ORDER BY t_sec",
+        (video_id,)).fetchall()
+
 
 def save_shot_label(conn: sqlite3.Connection, video_id: str, t_sec: float,
                     kind: str, value: Optional[str], source: str,
