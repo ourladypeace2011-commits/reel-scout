@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 from reel_scout import config, db, label_shots
 from reel_scout.shot_size import UNKNOWN
@@ -94,7 +94,8 @@ def test_a_model_that_will_not_answer_a_code_is_refused_and_stores_nothing():
     try:
         vid = _seed(conn)
         with patch("os.path.exists", return_value=True), \
-             patch.object(label_shots, "classify_with_ollama", return_value=None):
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
             tally = label_shots.label_video(conn, vid, "qwen")
         assert tally["refused"] == 2 and tally["labelled"] == 0
         assert db.get_shot_labels(conn, vid, kind="shot_size") == []
@@ -109,7 +110,7 @@ def test_unknown_is_stored_rather_than_dropped():
     try:
         vid = _seed(conn)
         with patch("os.path.exists", return_value=True), \
-             patch.object(label_shots, "classify_with_ollama", return_value=UNKNOWN):
+             patch.object(label_shots, "classify_with_ollama", return_value=(UNKNOWN, None)):
             tally = label_shots.label_video(conn, vid, "qwen")
         assert tally["unknown"] == 2 and tally["labelled"] == 0
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
@@ -123,7 +124,7 @@ def test_every_stored_row_carries_the_model_that_produced_it():
     try:
         vid = _seed(conn)
         with patch("os.path.exists", return_value=True), \
-             patch.object(label_shots, "classify_with_ollama", return_value="MS"):
+             patch.object(label_shots, "classify_with_ollama", return_value=("MS", None)):
             label_shots.label_video(conn, vid, "qwen2.5vl:7b")
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
         assert all(r["model"] == "qwen2.5vl:7b" and r["source"] == "vlm" for r in rows)
@@ -247,7 +248,7 @@ def test_force_labels_an_interview_anyway():
         vid = _seed(conn)
         _analysis(conn, vid, "talking_head")
         with patch("os.path.exists", return_value=True), \
-             patch.object(label_shots, "classify_with_ollama", return_value="MCU"):
+             patch.object(label_shots, "classify_with_ollama", return_value=("MCU", None)):
             tally = label_shots.label_video(conn, vid, "m", force=True)
         assert tally["skipped_format"] is None and tally["labelled"] == 2
     finally:
@@ -295,7 +296,7 @@ def test_a_relative_keyframe_path_is_resolved_not_read_raw(monkeypatch, tmp_path
         elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
         assert not os.path.exists("./data/keyframes/f11.jpg")
-        with patch.object(label_shots, "classify_with_ollama", return_value="CU") as ask:
+        with patch.object(label_shots, "classify_with_ollama", return_value=("CU", None)) as ask:
             tally = label_shots.label_video(conn, vid, "m")
         assert tally["missing"] == 0 and tally["labelled"] == 1
         # And the model must be handed something openable, not the stored string.
@@ -338,7 +339,7 @@ def test_a_vlm_label_records_the_prompt_that_produced_it():
     try:
         vid = _seed(conn, frames=((11, 2.0),))
         with patch("os.path.exists", return_value=True), \
-             patch.object(label_shots, "classify_with_ollama", return_value="MCU"):
+             patch.object(label_shots, "classify_with_ollama", return_value=("MCU", None)):
             label_shots.label_video(conn, vid, "m")
         row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
         assert row["prompt_hash"] == prompt_fingerprint()
@@ -404,5 +405,163 @@ def test_the_re_run_list_names_each_clip_once():
         db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m")
         db.save_shot_label(conn, vid, 5.0, "shot_size", "LS", "vlm", "m")
         assert label_shots.stale_videos(conn) == [vid]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+# --- an outage is not a verdict (2026-09-03) --------------------------------
+
+def _outcome(payload=None, raise_=None):
+    """A fake urlopen returning `payload`, or raising `raise_`."""
+    import contextlib, io as _io, json as _json
+
+    @contextlib.contextmanager
+    def fake(req, timeout=None):
+        if raise_ is not None:
+            raise raise_
+        yield _io.BytesIO(_json.dumps(payload).encode("utf-8"))
+    return fake
+
+
+def test_an_answer_outside_the_vocabulary_is_unparseable():
+    # The real one: `EUC`, a transposition of `ECU`, at temperature 0 -- so it
+    # comes back identical every run and no amount of retrying helps.
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"x")), \
+         patch("urllib.request.urlopen",
+               _outcome({"response": "EUC"})):
+        code, why = label_shots.classify_with_ollama("f.jpg", "m")
+    assert code is None and why == label_shots.REFUSAL_UNPARSEABLE
+
+
+def test_ollama_being_down_is_unreachable_not_a_refusal():
+    import urllib.error
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"x")), \
+         patch("urllib.request.urlopen",
+               _outcome(raise_=urllib.error.URLError("down"))):
+        code, why = label_shots.classify_with_ollama("f.jpg", "m")
+    assert code is None and why == label_shots.REFUSAL_UNREACHABLE
+
+
+def test_an_outage_never_removes_a_label():
+    # The reason the two causes had to be split at all. Folded together, a
+    # five-minute ollama restart would have deleted every superseded label in
+    # the library and called it convergence.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "ECU", "vlm", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=(None, label_shots.REFUSAL_UNREACHABLE)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["unreachable"] == 1 and tally["dropped"] == 0
+        assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_retired_label_the_prompt_cannot_reproduce_is_dropped():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "ECU", "vlm", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["refused"] == 1 and tally["dropped"] == 1
+        assert db.get_shot_labels(conn, vid, kind="shot_size") == []
+        # And so the clip converges: this is the whole reason for the drop.
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_current_label_is_never_dropped_on_a_refusal():
+    # Only labels from a retired prompt are at stake. A refusal on a frame
+    # whose label is already current must leave it alone.
+    from reel_scout.shot_size import prompt_fingerprint
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m",
+                           prompt_fingerprint())
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["dropped"] == 0
+        assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_refusal_drops_only_the_frame_it_refused():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "ECU", "vlm", "m", "OLD")
+        db.save_shot_label(conn, vid, 5.0, "shot_size", "LS", "vlm", "m", "OLD")
+        answers = [("MCU", None), (None, label_shots.REFUSAL_UNPARSEABLE)]
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama",
+                          side_effect=answers):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["labelled"] == 1 and tally["dropped"] == 1
+        rows = db.get_shot_labels(conn, vid, kind="shot_size")
+        assert [(r["t_sec"], r["value"]) for r in rows] == [(2.0, "MCU")]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_supplied_label_survives_a_refusal_from_the_model():
+    # It carries no fingerprint by design. A drop keyed on "no fingerprint"
+    # instead of "not the current one, and ours" would delete hand-supplied
+    # work the model was never asked to reproduce.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "supplied", None)
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["dropped"] == 0
+        assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_valid_answer_is_returned_with_no_refusal():
+    # The success path had no test at all, so "always unparseable" passed the
+    # suite -- and every label in the library would have been dropped.
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"x")), \
+         patch("urllib.request.urlopen", _outcome({"response": "MCU"})):
+        code, why = label_shots.classify_with_ollama("f.jpg", "m")
+    assert (code, why) == ("MCU", None)
+
+
+def test_a_refusal_leaves_labels_at_other_timestamps_alone():
+    # `shot_labels` hangs off timestamps rather than shot ids precisely so that
+    # re-analysis cannot delete it, which means a clip can carry labels at
+    # timestamps no longer represented by any shot. A drop scoped to the clip
+    # instead of to the frame would sweep those away as collateral -- and the
+    # earlier test could not see it, because in that one the surviving label
+    # had already been refreshed to the current prompt by the same run.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "ECU", "vlm", "m", "OLD")
+        db.save_shot_label(conn, vid, 99.0, "shot_size", "LS", "vlm", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["dropped"] == 1
+        rows = db.get_shot_labels(conn, vid, kind="shot_size")
+        assert [(r["t_sec"], r["value"]) for r in rows] == [(99.0, "LS")]
     finally:
         conn.close(); os.unlink(path)

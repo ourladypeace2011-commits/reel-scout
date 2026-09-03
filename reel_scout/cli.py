@@ -841,8 +841,10 @@ def _cmd_shot_size(args) -> None:
               % tally["skipped_format"])
         conn.close()
         return
-    print("shot sizes: %d labelled, %d UNKNOWN, %d refused, %d skipped, %d missing"
+    print("shot sizes: %d labelled, %d UNKNOWN, %d refused, %d unreachable, "
+          "%d dropped, %d skipped, %d missing"
           % (tally["labelled"], tally["unknown"], tally["refused"],
+             tally["unreachable"], tally["dropped"],
              tally["skipped"], tally["missing"]))
     if tally["missing"]:
         print("  missing = the keyframe file could not be read (paths in this DB "
@@ -856,6 +858,16 @@ def _cmd_shot_size(args) -> None:
     if tally["refused"]:
         print("  refused = the model answered something that was not one of the "
               "codes; it will answer the same way on a retry", file=sys.stderr)
+    if tally["unreachable"]:
+        # Deliberately NOT folded into `refused`: this one is worth running
+        # again, and the whole point of splitting them is that the operator can
+        # tell which run to repeat.
+        print("  unreachable = ollama did not answer — environment, not verdict; "
+              "this run is worth repeating", file=sys.stderr)
+    if tally["dropped"]:
+        print("  dropped = %d label(s) from a retired prompt sat on frames this "
+              "prompt cannot answer, so they were removed rather than left "
+              "looking current" % tally["dropped"], file=sys.stderr)
     conn.close()
 
 
