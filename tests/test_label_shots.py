@@ -82,7 +82,7 @@ def test_unreadable_frames_are_missing_not_refused():
     try:
         vid = _seed(conn)
         with patch.object(label_shots, "classify_with_ollama") as ask:
-            tally = label_shots.label_video(conn, vid, "qwen")
+            tally = label_shots.label_video(conn, vid, "qwen", gate=False)
         ask.assert_not_called()
         assert tally["missing"] == 2 and tally["refused"] == 0
     finally:
@@ -96,7 +96,7 @@ def test_a_model_that_will_not_answer_a_code_is_refused_and_stores_nothing():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
-            tally = label_shots.label_video(conn, vid, "qwen")
+            tally = label_shots.label_video(conn, vid, "qwen", gate=False)
         assert tally["refused"] == 2 and tally["labelled"] == 0
         assert db.get_shot_labels(conn, vid, kind="shot_size") == []
     finally:
@@ -111,7 +111,7 @@ def test_unknown_is_stored_rather_than_dropped():
         vid = _seed(conn)
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama", return_value=(UNKNOWN, None)):
-            tally = label_shots.label_video(conn, vid, "qwen")
+            tally = label_shots.label_video(conn, vid, "qwen", gate=False)
         assert tally["unknown"] == 2 and tally["labelled"] == 0
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
         assert [r["value"] for r in rows] == [UNKNOWN, UNKNOWN]
@@ -125,7 +125,7 @@ def test_every_stored_row_carries_the_model_that_produced_it():
         vid = _seed(conn)
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama", return_value=("MS", None)):
-            label_shots.label_video(conn, vid, "qwen2.5vl:7b")
+            label_shots.label_video(conn, vid, "qwen2.5vl:7b", gate=False)
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
         assert all(r["model"] == "qwen2.5vl:7b" and r["source"] == "vlm" for r in rows)
     finally:
@@ -232,7 +232,7 @@ def test_an_interview_is_skipped_and_says_so():
         vid = _seed(conn)
         _analysis(conn, vid, "talking_head")
         with patch.object(label_shots, "classify_with_ollama") as ask:
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         ask.assert_not_called()
         assert tally["skipped_format"] == "talking_head"
         assert tally["labelled"] == 0
@@ -249,7 +249,7 @@ def test_force_labels_an_interview_anyway():
         _analysis(conn, vid, "talking_head")
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama", return_value=("MCU", None)):
-            tally = label_shots.label_video(conn, vid, "m", force=True)
+            tally = label_shots.label_video(conn, vid, "m", gate=False, force=True)
         assert tally["skipped_format"] is None and tally["labelled"] == 2
     finally:
         conn.close(); os.unlink(path)
@@ -297,7 +297,7 @@ def test_a_relative_keyframe_path_is_resolved_not_read_raw(monkeypatch, tmp_path
         monkeypatch.chdir(elsewhere)
         assert not os.path.exists("./data/keyframes/f11.jpg")
         with patch.object(label_shots, "classify_with_ollama", return_value=("CU", None)) as ask:
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["missing"] == 0 and tally["labelled"] == 1
         # And the model must be handed something openable, not the stored string.
         assert os.path.isabs(ask.call_args[0][0])
@@ -340,7 +340,7 @@ def test_a_vlm_label_records_the_prompt_that_produced_it():
         vid = _seed(conn, frames=((11, 2.0),))
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama", return_value=("MCU", None)):
-            label_shots.label_video(conn, vid, "m")
+            label_shots.label_video(conn, vid, "m", gate=False)
         row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
         assert row["prompt_hash"] == prompt_fingerprint()
     finally:
@@ -455,7 +455,7 @@ def test_an_outage_never_removes_a_label():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           return_value=(None, label_shots.REFUSAL_UNREACHABLE)):
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["unreachable"] == 1 and tally["dropped"] == 0
         assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
     finally:
@@ -470,7 +470,7 @@ def test_a_retired_label_the_prompt_cannot_reproduce_is_dropped():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["refused"] == 1 and tally["dropped"] == 1
         assert db.get_shot_labels(conn, vid, kind="shot_size") == []
         # And so the clip converges: this is the whole reason for the drop.
@@ -491,7 +491,7 @@ def test_a_current_label_is_never_dropped_on_a_refusal():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["dropped"] == 0
         assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
     finally:
@@ -508,7 +508,7 @@ def test_a_refusal_drops_only_the_frame_it_refused():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           side_effect=answers):
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["labelled"] == 1 and tally["dropped"] == 1
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
         assert [(r["t_sec"], r["value"]) for r in rows] == [(2.0, "MCU")]
@@ -527,7 +527,7 @@ def test_a_supplied_label_survives_a_refusal_from_the_model():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["dropped"] == 0
         assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
     finally:
@@ -559,9 +559,119 @@ def test_a_refusal_leaves_labels_at_other_timestamps_alone():
         with patch("os.path.exists", return_value=True), \
              patch.object(label_shots, "classify_with_ollama",
                           return_value=(None, label_shots.REFUSAL_UNPARSEABLE)):
-            tally = label_shots.label_video(conn, vid, "m")
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
         assert tally["dropped"] == 1
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
         assert [(r["t_sec"], r["value"]) for r in rows] == [(99.0, "LS")]
     finally:
         conn.close(); os.unlink(path)
+
+
+# --- the gate: ask whether the question applies before asking it -----------
+
+def test_the_gate_records_unknown_without_calling_the_classifier():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate", return_value=(False, None)), \
+             patch.object(label_shots, "classify_with_ollama") as ask:
+            tally = label_shots.label_video(conn, vid, "m")
+        ask.assert_not_called()
+        assert tally["gated"] == 1 and tally["unknown"] == 1
+        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
+        assert row["value"] == UNKNOWN
+        # Stamped current, or the frame is re-asked on every single run.
+        from reel_scout.shot_size import prompt_fingerprint
+        assert row["prompt_hash"] == prompt_fingerprint()
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_frame_the_gate_accepts_still_goes_to_the_classifier():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate", return_value=(True, None)), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=("MCU", None)) as ask:
+            tally = label_shots.label_video(conn, vid, "m")
+        ask.assert_called_once()
+        assert tally["gated"] == 0 and tally["labelled"] == 1
+        assert db.get_shot_labels(conn, vid, kind="shot_size")[0]["value"] == "MCU"
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_gate_that_cannot_answer_falls_through_to_the_classifier():
+    # Failing closed would let one unparseable reply mark the frame unusable --
+    # a bigger claim than a gate that answered nothing has earned.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate",
+                          return_value=(None, label_shots.REFUSAL_UNPARSEABLE)), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=("LS", None)) as ask:
+            tally = label_shots.label_video(conn, vid, "m")
+        ask.assert_called_once()
+        assert tally["gated"] == 0 and tally["labelled"] == 1
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_an_outage_at_the_gate_does_not_reach_the_classifier():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate",
+                          return_value=(None, label_shots.REFUSAL_UNREACHABLE)), \
+             patch.object(label_shots, "classify_with_ollama") as ask:
+            tally = label_shots.label_video(conn, vid, "m")
+        ask.assert_not_called()
+        assert tally["unreachable"] == 1 and tally["gated"] == 0
+        assert db.get_shot_labels(conn, vid, kind="shot_size") == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_no_gate_asks_every_frame_for_a_code():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate") as gate, \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=("CU", None)):
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
+        gate.assert_not_called()
+        assert tally["labelled"] == 1
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_the_fingerprint_covers_the_gate_prompt_too():
+    # A gate change that left the fingerprint alone would put two different
+    # measurements back in one column -- the thing the column exists to stop.
+    from reel_scout import shot_size
+    before = shot_size.prompt_fingerprint()
+    original = shot_size.subject_gate_prompt
+    try:
+        shot_size.subject_gate_prompt = lambda: "something else"
+        assert shot_size.prompt_fingerprint() != before
+    finally:
+        shot_size.subject_gate_prompt = original
+    assert shot_size.prompt_fingerprint() == before
+
+
+def test_the_gate_answer_is_prefix_matched_not_equality_matched():
+    from reel_scout.shot_size import parse_gate_answer
+    assert parse_gate_answer("YES, a person") is True
+    assert parse_gate_answer("no.") is False
+    assert parse_gate_answer("Maybe") is None
+    assert parse_gate_answer("") is None
+    assert parse_gate_answer(None) is None

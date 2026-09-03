@@ -168,6 +168,57 @@ def classification_prompt() -> str:
     )
 
 
+def subject_gate_prompt() -> str:
+    """The binary question asked before the seven-way one.
+
+    🔴 **Why a separate pass rather than a longer prompt.** The obvious move is
+    to spell the exceptions out inside `classification_prompt`. It was tried and
+    measured on 2026-09-03, same 12 frames, same model:
+
+        current prompt (short UNKNOWN clause)   2/12   12.8 s/frame
+        + the five exception categories         0/12   35.6 s/frame
+
+    It got *worse* — it broke the two frames the short prompt got right — and
+    cost three times the wall-clock. The identical rules asked as a **binary**
+    question score 10/12, rejecting 9 of 9 ill-posed frames with no false
+    accepts. So the problem was never the rules; it is a long exception list
+    against a seven-way output in a 7B model.
+
+    ⚠️ **What this costs**: the gate over-rejects. Of three well-posed frames it
+    accepted one. n=3, so the number is soft, but the direction is not — this
+    trades recall for precision deliberately, because these labels become `REF:`
+    hints a person reads, and a confident wrong hint anchors them worse than a
+    missing one does.
+    """
+    return (
+        "Is this frame a single photographic shot whose main subject is a "
+        "person (or human figure) framed clearly enough to judge how much of "
+        "the frame the body fills?\n"
+        "Answer NO if the frame is a title card, a graphic, black, a screen "
+        "recording or interface, a split-screen or side-by-side comparison "
+        "layout, or if there is no person as the main subject.\n"
+        "Answer with exactly YES or NO and nothing else."
+    )
+
+
+def parse_gate_answer(text) -> Optional[bool]:
+    """True/False for a usable answer, None for anything else.
+
+    Prefix-matched rather than equality-matched: the model reliably leads with
+    the word and sometimes trails punctuation. Anything that is neither is a
+    refusal, and a refusal is not a NO — see `label_shots`, which falls through
+    to the classifier rather than silently marking the frame unusable.
+    """
+    if not text:
+        return None
+    t = text.strip().upper()
+    if t.startswith("YES"):
+        return True
+    if t.startswith("NO"):
+        return False
+    return None
+
+
 def prompt_fingerprint() -> str:
     """Short hash of the current prompt, stored beside every label it produced.
 
@@ -175,7 +226,11 @@ def prompt_fingerprint() -> str:
     fingerprint of the actual text cannot. Same reasoning as
     `translations.source_hash`.
     """
-    return hashlib.sha256(classification_prompt().encode("utf-8")).hexdigest()[:16]
+    # Both prompts, because both decide what a label says. A gate change that
+    # left the fingerprint alone would leave the column holding two different
+    # measurements again -- the exact thing the column was added to prevent.
+    joined = subject_gate_prompt() + "\n\n" + classification_prompt()
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
 def parse_answer(raw: Optional[str]) -> Optional[str]:

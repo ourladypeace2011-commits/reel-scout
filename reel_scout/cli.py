@@ -191,6 +191,10 @@ def main(argv: List[str] = None) -> None:
     p_size.add_argument("--force", action="store_true",
                         help="Label even a format whose framing never changes "
                              "(interviews are skipped by default)")
+    p_size.add_argument("--no-gate", action="store_true",
+                        help="Skip the 'does this question apply' pass and ask "
+                             "every frame for a code (more labels, more wrong "
+                             "ones -- see shot_size.subject_gate_prompt)")
 
     p_export = sub.add_parser("export", help="Export analyses")
     p_export.add_argument("--format", choices=["json", "csv", "html", "bundle", "skeleton", "storyboard"],
@@ -834,22 +838,27 @@ def _cmd_shot_size(args) -> None:
             supplied = {str(k): v for k, v in (json.load(f) or {}).items()}
     tally = label_video(conn, video_id, args.model,
                         base_url=args.base_url, supplied=supplied,
-                        force=args.force)
+                        force=args.force, gate=not args.no_gate)
     if tally["skipped_format"]:
         print("skipped: style_format=%s — every shot is the same framing, so "
               "labelling each one buys almost nothing (use --force to override)"
               % tally["skipped_format"])
         conn.close()
         return
-    print("shot sizes: %d labelled, %d UNKNOWN, %d refused, %d unreachable, "
-          "%d dropped, %d skipped, %d missing"
-          % (tally["labelled"], tally["unknown"], tally["refused"],
-             tally["unreachable"], tally["dropped"],
+    print("shot sizes: %d labelled, %d UNKNOWN (%d gated), %d refused, "
+          "%d unreachable, %d dropped, %d skipped, %d missing"
+          % (tally["labelled"], tally["unknown"], tally["gated"],
+             tally["refused"], tally["unreachable"], tally["dropped"],
              tally["skipped"], tally["missing"]))
     if tally["missing"]:
         print("  missing = the keyframe file could not be read (paths in this DB "
               "are relative to the checkout that wrote them) — not a model problem",
               file=sys.stderr)
+    if tally["gated"]:
+        print("  gated = the frame is a title card, an interface, a composite "
+              "layout or has no person as its subject, so the seven codes -- "
+              "which are defined by where a human body is cut -- have no answer "
+              "for it")
     if tally["unknown"]:
         # Stored on purpose: "asked, no answer" and "never asked" are different
         # states and only one is worth re-running.
