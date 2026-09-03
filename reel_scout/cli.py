@@ -917,6 +917,18 @@ def _cmd_show(args) -> None:
     keyframes = db.get_keyframes_with_descriptions(conn, args.video_id)
     if keyframes:
         described = sum(1 for k in keyframes if k["description"])
+        from .label_shots import analysable
+        scaled, labelled = analysable(conn, args.video_id)
+        if labelled:
+            print("\n--- Shot sizes ---")
+            print("analysable: %d%% (%d/%d frame(s) yielded a scale)"
+                  % (round(100.0 * scaled / labelled), scaled, labelled))
+            if scaled * 2 < labelled:
+                # Said plainly rather than left to be inferred from a low
+                # number: most of this clip is not the kind of thing the
+                # vocabulary describes, so its few codes carry little.
+                print("  most frames here are graphics, interface or composite "
+                      "-- read the codes below as weak signal")
         print(f"\n--- Keyframes ({described}/{len(keyframes)} described) ---")
         for k in keyframes:
             mark = " " if k["description"] else "*"

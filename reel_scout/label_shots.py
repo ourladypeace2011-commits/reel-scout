@@ -55,7 +55,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config, db
-from .shot_size import (SOURCE_VLM, UNKNOWN, classification_prompt,
+from .shot_size import (SOURCE_GATE, SOURCE_VLM, UNKNOWN, classification_prompt,
                          parse_answer, parse_gate_answer, prompt_fingerprint,
                          subject_gate_prompt)
 from .shots import Shot, bind_frames_to_shots
@@ -87,7 +87,7 @@ SKIP_FORMATS = ("talking_head",)
 #: at all, so it was tested code that judged nothing. Three copies of a rule
 #: agree right up until the day one of them is edited, and the disagreement
 #: would surface as health saying "0 stale" while the re-run kept finding work.
-STALE_PROMPT_SQL = ("l.kind = 'shot_size' AND l.source = ? "
+STALE_PROMPT_SQL = ("l.kind = 'shot_size' AND l.source IN (?, ?) "
                     "AND COALESCE(l.prompt_hash, '') != ?")
 
 
@@ -99,7 +99,7 @@ def stale_prompt_params() -> tuple:
     moved ten-to-one when the prompt changed, so a label whose prompt cannot be
     established is not comparable to one whose can.
     """
-    return (SOURCE_VLM, prompt_fingerprint())
+    return (SOURCE_VLM, SOURCE_GATE, prompt_fingerprint())
 
 
 def drop_superseded_label(conn, video_id: str, t_sec: float) -> int:
@@ -117,6 +117,35 @@ def drop_superseded_label(conn, video_id: str, t_sec: float) -> int:
         (video_id, t_sec) + stale_prompt_params())
     conn.commit()
     return cur.rowcount
+
+
+def analysable(conn, video_id: str) -> Tuple[int, int]:
+    """`(frames that yielded a scale, frames labelled)` for one clip.
+
+    The number Hevin asked for on 2026-09-03, and it is reported rather than
+    enforced: a clip that is 90% graphics still gets its labels written, with
+    the ratio next to them, and the person reading decides whether to trust it.
+    Blocking would be the wrong shape here — the same detect-and-surface rule
+    `db health` already follows.
+
+    🔴 **Keyed on the value, not the source.** Anything stored as `UNKNOWN`
+    yielded no scale, whether the gate rejected the frame or the classifier
+    looked and found no subject. Keying on `source` instead would silently
+    report 100% for every clip labelled before `SOURCE_GATE` existed — a wrong
+    number that looks like a healthy one.
+
+    **Why the denominator is labelled frames, not shots.** A clip whose frames
+    are unreadable has no labels at all, and dividing by shots would report it
+    as 0% analysable — which reads as "this is a graphics piece" when the truth
+    is "the files are missing". Those are different problems with different
+    remedies, and `db health` already counts the second one.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN value != ? THEN 1 ELSE 0 END) AS scaled "
+        "FROM shot_labels WHERE video_id = ? AND kind = 'shot_size' "
+        "AND source != 'supplied'", (UNKNOWN, video_id)).fetchone()
+    return int(row["scaled"] or 0), int(row["total"] or 0)
 
 
 def stale_videos(conn) -> List[str]:
@@ -279,6 +308,7 @@ def label_video(conn, video_id: str, model: str,
                     tally["unreachable"] += 1
                     continue
                 if applies is False:
+                    source = SOURCE_GATE
                     # Not a demotion -- this is what UNKNOWN was defined to
                     # mean here: "no subject to frame against". Stored with the
                     # current fingerprint, so the frame converges instead of
@@ -314,6 +344,7 @@ def label_video(conn, video_id: str, model: str,
                            # Supplied labels did not come from our prompt, so
                            # they carry no fingerprint — stamping one would
                            # claim a provenance they do not have.
-                           prompt_fingerprint() if source == SOURCE_VLM else None)
+                           prompt_fingerprint()
+                           if source in (SOURCE_VLM, SOURCE_GATE) else None)
         tally["unknown" if code == UNKNOWN else "labelled"] += 1
     return tally

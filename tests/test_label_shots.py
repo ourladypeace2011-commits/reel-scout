@@ -675,3 +675,81 @@ def test_the_gate_answer_is_prefix_matched_not_equality_matched():
     assert parse_gate_answer("Maybe") is None
     assert parse_gate_answer("") is None
     assert parse_gate_answer(None) is None
+
+
+# --- the analysable ratio: reported, never enforced (2026-09-03) -----------
+
+def test_analysable_counts_a_gated_frame_as_not_analysable():
+    from reel_scout.shot_size import SOURCE_GATE
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "MCU", "vlm", "m")
+        db.save_shot_label(conn, vid, 5.0, "shot_size", UNKNOWN, SOURCE_GATE, "m")
+        assert label_shots.analysable(conn, vid) == (1, 2)
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_analysable_keys_on_the_value_not_the_source():
+    # Rows written before SOURCE_GATE existed carry `vlm`. Keying on source
+    # would report those clips as 100% analysable -- a wrong number that reads
+    # like a healthy one.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", UNKNOWN, "vlm", "m")
+        db.save_shot_label(conn, vid, 5.0, "shot_size", UNKNOWN, "vlm", "m")
+        assert label_shots.analysable(conn, vid) == (0, 2)
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_analysable_ignores_supplied_labels():
+    # Hand-supplied codes did not come from the pass this ratio describes.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "supplied", None)
+        db.save_shot_label(conn, vid, 5.0, "shot_size", UNKNOWN, "vlm", "m")
+        assert label_shots.analysable(conn, vid) == (0, 1)
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_analysable_is_zero_over_zero_when_nothing_was_labelled():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        assert label_shots.analysable(conn, vid) == (0, 0)
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_gated_row_is_written_with_the_gate_as_its_source():
+    from reel_scout.shot_size import SOURCE_GATE, prompt_fingerprint
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate", return_value=(False, None)):
+            label_shots.label_video(conn, vid, "m")
+        row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
+        assert row["source"] == SOURCE_GATE
+        # Still ours, so a prompt change must still bring it back for a re-run.
+        assert row["prompt_hash"] == prompt_fingerprint()
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_gated_row_from_an_old_prompt_is_queued_for_a_re_run():
+    from reel_scout.shot_size import SOURCE_GATE
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", UNKNOWN, SOURCE_GATE,
+                           "m", "OLD")
+        assert label_shots.stale_videos(conn) == [vid]
+    finally:
+        conn.close(); os.unlink(path)
