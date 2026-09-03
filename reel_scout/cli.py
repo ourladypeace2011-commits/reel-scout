@@ -196,6 +196,10 @@ def main(argv: List[str] = None) -> None:
                              "every frame for a code (more labels, more wrong "
                              "ones -- see shot_size.subject_gate_prompt)")
 
+    p_motion = sub.add_parser(
+        "motion", help="Measure camera movement per shot from motion vectors")
+    p_motion.add_argument("video_id")
+
     p_export = sub.add_parser("export", help="Export analyses")
     p_export.add_argument("--format", choices=["json", "csv", "html", "bundle", "skeleton", "storyboard"],
                           default="json")
@@ -438,6 +442,7 @@ def main(argv: List[str] = None) -> None:
         "group": _cmd_group,
         "mark": _cmd_mark,
         "shot-size": _cmd_shot_size,
+        "motion": _cmd_motion,
         "storyboard-diff": _cmd_storyboard_diff,
         "translate": _cmd_translate,
         "research": _cmd_research,
@@ -877,6 +882,51 @@ def _cmd_shot_size(args) -> None:
         print("  dropped = %d label(s) from a retired prompt sat on frames this "
               "prompt cannot answer, so they were removed rather than left "
               "looking current" % tally["dropped"], file=sys.stderr)
+    conn.close()
+
+
+def _cmd_motion(args) -> None:
+    from . import db, motion
+
+    config.ensure_dirs()
+    conn = db.init_db()
+    video = db.get_video(conn, args.video_id)
+    if not video:
+        print(f"Video not found: {args.video_id}")
+        conn.close()
+        return
+    if not media_paths.exists(video["file_path"]):
+        print("Media file not readable: %s"
+              % media_paths.resolve_media_path(video["file_path"]), file=sys.stderr)
+        conn.close()
+        return
+    try:
+        rows = motion.shot_motion(
+            conn, args.video_id, media_paths.resolve_media_path(video["file_path"]))
+    except ImportError as exc:
+        print(str(exc), file=sys.stderr)
+        conn.close()
+        return
+    if not rows:
+        print("No shots for this clip — run `db backfill-shots` first")
+        conn.close()
+        return
+    db.save_shot_motion(conn, args.video_id, rows)
+    tally = {}
+    for r in rows:
+        tally[r["movement"]] = tally.get(r["movement"], 0) + 1
+    print("camera movement: " + ", ".join(
+        "%d %s" % (tally[k], k) for k in sorted(tally, key=lambda x: -tally[x])))
+    if tally.get(motion.STILL_SUBJECT_MOVES):
+        # Named rather than folded into "static": it is the state the first
+        # attempt at this had no way to see, and the one it misread as camera
+        # work.
+        print("  still_subject_moves = the camera holds while something inside "
+              "the frame moves — not camera work")
+    if tally.get(motion.UNKNOWN):
+        print("  unknown = fewer than %d coded frames in the shot; a median "
+              "over three frames is not a median" % motion.MIN_FRAMES,
+              file=sys.stderr)
     conn.close()
 
 
