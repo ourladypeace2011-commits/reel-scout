@@ -75,6 +75,8 @@ STRINGS = {
         "wYours": "yours",
         "zeroWeights": "all weights at zero — no verdict",
         "decoded": "Decoded structure",
+        "shotGrammar": "Shot grammar",
+        "analysable": "analysable",
         "dim.overall": "Overall",
         "dim.hook_strength": "Hook",
         "dim.visual_storytelling": "Visual",
@@ -152,6 +154,8 @@ STRINGS = {
         "wYours": "你的",
         "zeroWeights": "所有權重為零 — 無評分",
         "decoded": "解構分析",
+        "shotGrammar": "鏡頭語法",
+        "analysable": "可分析",
         "dim.overall": "總分",
         "dim.hook_strength": "開場鉤子",
         "dim.visual_storytelling": "視覺敘事",
@@ -284,6 +288,12 @@ VALUE_KEYS = (
     "follow", "like", "comment", "link", "visit",
     # shared by opening_type and cta_type
     "none",
+    # shot_size (roadmap §6B). `UNKNOWN` earns a translation of its own: on
+    # this corpus it is 69% of all labels, so "the question does not apply
+    # here" is the most common thing the page says.
+    "ECU", "CU", "MCU", "MS", "MLS", "LS", "ELS", "UNKNOWN",
+    # shot movement (§6C)
+    "static", "still_subject_moves", "camera_moves", "unsteady", "unknown",
 )
 
 #: Traditional Chinese for each. English is the value itself, so the baseline
@@ -298,6 +308,10 @@ _VALUE_ZH = {
     "fast": "快", "medium": "中", "slow": "慢",
     "question": "提問", "statement": "陳述", "visual": "畫面", "music": "音樂",
     "follow": "追蹤", "like": "按讚", "comment": "留言", "link": "連結",
+    "ECU": "大特寫", "CU": "特寫", "MCU": "中特寫", "MS": "中景",
+    "MLS": "中遠景", "LS": "遠景", "ELS": "大遠景", "UNKNOWN": "不適用",
+    "static": "固定", "still_subject_moves": "機位不動·畫面內有動作",
+    "camera_moves": "運鏡", "unsteady": "手持/不穩", "unknown": "幀數不足",
     "visit": "到店",
     "none": "無",
 }

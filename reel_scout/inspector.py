@@ -26,7 +26,8 @@ import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import annotate, config, db, i18n, marks as marks_mod, theme
+from . import (annotate, config, db, i18n, label_shots,
+               marks as marks_mod, theme)
 from .viewer import build_video_view
 from .utils import paths as media_paths
 
@@ -84,6 +85,50 @@ def resolve_video_file(file_path: Optional[str]) -> Optional[str]:
 
 # --- Data assembly ---
 
+def _shot_grammar(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
+    """Per-shot size and movement, plus how much of the clip the question fits.
+
+    🔴 **The ratio ships beside the codes, never without them.** Measured on
+    2026-09-03: across 94 labelled clips, 40 have *no* frame the shot-size
+    vocabulary applies to -- they are screen recordings, title cards and
+    composite layouts, and their codes mean nothing. A page showing the codes
+    alone would present those forty as confidently as the two that scored 100%.
+
+    Reads what is stored; measures nothing. A clip that has been through
+    neither `shot-size` nor `motion` renders no block rather than an empty one.
+    """
+    sizes = {}
+    for row in db.get_shot_labels(conn, video_id, kind="shot_size"):
+        # `supplied` is a person's own call and outranks the model's.
+        if row["t_sec"] not in sizes or row["source"] == "supplied":
+            sizes[row["t_sec"]] = row["value"]
+    motions = {r["t_sec"]: r for r in db.get_shot_motion(conn, video_id)}
+    shots = conn.execute(
+        "SELECT idx, start_sec, end_sec FROM shots WHERE video_id = ? "
+        "ORDER BY idx", (video_id,)).fetchall()
+    rows = []
+    for shot in shots:
+        start = shot["start_sec"]
+        # A size hangs off its representative frame, which sits *inside* the
+        # span rather than on its edge -- so match by span, not by equality.
+        # Motion hangs off the span start, so that lookup is exact.
+        size = None
+        for t_sec, value in sizes.items():
+            if start <= t_sec < shot["end_sec"]:
+                size = value
+                break
+        m = motions.get(start)
+        if size is None and m is None:
+            continue
+        rows.append({"idx": shot["idx"], "start": start,
+                     "end": shot["end_sec"], "size": size,
+                     "movement": m["movement"] if m else None,
+                     "speed": m["speed"] if m else None,
+                     "agreement": m["agreement"] if m else None})
+    scaled, labelled = label_shots.analysable(conn, video_id)
+    return {"rows": rows, "scaled": scaled, "labelled": labelled}
+
+
 def build_inspect_view(conn: db.sqlite3.Connection, video_id: str) -> Optional[Dict[str, Any]]:
     """One clip's inspector payload, or None if unknown. Extends the viewer view
     with per-segment transcript, a resolved duration, and video-file presence."""
@@ -129,6 +174,7 @@ def build_inspect_view(conn: db.sqlite3.Connection, video_id: str) -> Optional[D
     # frozen export and the live page get it from the same place -- and so the
     # one caller that must NOT ship them (the take-home bundle) has a single,
     # visible thing to withhold.
+    view["shot_grammar"] = _shot_grammar(conn, video_id)
     view["marks"] = marks_mod.list_for(conn, video_id)
     view["segments"] = segments
     view["language"] = language
@@ -309,6 +355,51 @@ def _render_structure(view: Dict[str, Any]) -> str:
         return ""
     return ('<section class="block"><div class="eyebrow" data-i18n="decoded">Decoded structure</div>'
             '<div class="metagrid">%s</div></section>' % "".join(cells))
+
+
+def _cell(css: str, value: str) -> str:
+    """A value cell, translatable only when the value is in a closed vocabulary.
+
+    Follows `_render_structure`: `value_key` returns None for anything outside
+    the vocabularies, and a `data-i18n` key that does not exist is dead markup
+    — harmless today only because `applyLang` skips unknown keys.
+    """
+    key = i18n.value_key(value)
+    if key is None:
+        return '<span class="%s">%s</span>' % (css, _e(value))
+    return '<span class="%s" data-i18n="%s">%s</span>' % (css, key, _e(value))
+
+
+def _render_shot_grammar(view: Dict[str, Any]) -> str:
+    grammar = view.get("shot_grammar") or {}
+    rows = grammar.get("rows") or []
+    if not rows:
+        return ""
+    labelled = grammar.get("labelled") or 0
+    scaled = grammar.get("scaled") or 0
+    note = ""
+    if labelled:
+        pct = int(round(100.0 * scaled / labelled))
+        cls = "warn" if scaled * 2 < labelled else ""
+        note = ('<div class="q %s"><span data-i18n="analysable">analysable</span> '
+                '%d%% (%d/%d)</div>' % (cls, pct, scaled, labelled))
+    cells = []
+    for r in rows:
+        size = r["size"] or "-"
+        move = r["movement"] or "-"
+        # Both vocabularies are closed, so both translate. The numbers travel
+        # with the movement class because a class with no measurement under it
+        # is the shape this project keeps paying for.
+        ev = ""
+        if r.get("speed") is not None:
+            ev = ('<span class="q">%.1f px &middot; %d%%</span>'
+                  % (r["speed"], int(round(100 * (r["agreement"] or 0)))))
+        cells.append(
+            '<div class="sgrow"><span class="q">%s</span>%s%s%s</div>'
+            % (_fmt_ts(r["start"]), _cell("sgz", size), _cell("sgm", move), ev))
+    return ('<section class="block"><div class="eyebrow" data-i18n="shotGrammar">'
+            'Shot grammar</div>%s<div class="sglist">%s</div></section>'
+            % (note, "".join(cells)))
 
 
 def render_inspector(view: Dict[str, Any], base: str = "",
@@ -501,11 +592,12 @@ def render_inspector(view: Dict[str, Any], base: str = "",
         '<button id="clrio" class="tbtn" data-i18n="clear">clear</button>'
         '<button id="srt" class="tbtn" data-i18n="exportSrt">export SRT (window)</button>'
         '</div></section>'
-        '%s%s%s%s%s'
+        '%s%s%s%s%s%s'
         % (back, langtoggle, _e(vid), _e(view["title"]), meta, _e(view["url"]),
            summary, preview, _t("waveform", "Waveform"), _WAVEFORM_BINS, wf_marks,
            marks_block, filmstrip, transcript,
-           _render_scores(view), _render_structure(view)))
+           _render_scores(view), _render_structure(view),
+           _render_shot_grammar(view)))
 
     return (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
@@ -868,6 +960,10 @@ a{color:inherit}
   font-variant-numeric:tabular-nums}
 .reasoning{margin:12px 0 0;color:var(--quiet);font-size:13px;max-width:62ch}
 .metagrid{display:grid;grid-template-columns:6rem 1fr;gap:3px 16px;font-size:13px}
+.sglist{display:flex;flex-direction:column;gap:2px;margin-top:8px}
+.sgrow{display:grid;grid-template-columns:64px 72px 1fr auto;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--line)}
+.sgz{font-weight:600}
+.q.warn{color:var(--warn,#c2410c)}
 .mk{color:var(--quiet);font-family:var(--mono);font-size:10px;letter-spacing:.12em;
   text-transform:uppercase;padding-top:3px}
 .mv{color:var(--ink)}

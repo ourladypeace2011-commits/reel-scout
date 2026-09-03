@@ -503,3 +503,95 @@ def test_segments_win_over_an_empty_text_full(temp_db):
         conn.close()
     assert view["has_transcript"] is True
     assert 'data-i18n="noTranscriptNote"' not in page
+
+
+# --- Shot grammar block (roadmap §6B/§6C on the page, 2026-09-03) -----------
+
+def _grammar_db(sizes=(), motions=(), shots=((0, 0.0, 5.0), (1, 5.0, 10.0))):
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    db.init_db(conn)
+    conn.execute("INSERT INTO videos (id, platform, platform_id, url, file_path) "
+                 "VALUES ('v1', 'p', 'v1', 'u', 'f.mp4')")
+    for idx, a, b in shots:
+        conn.execute("INSERT INTO shots (video_id, idx, start_sec, end_sec) "
+                     "VALUES ('v1', ?, ?, ?)", (idx, a, b))
+    for t_sec, value in sizes:
+        db.save_shot_label(conn, "v1", t_sec, "shot_size", value, "vlm", "m")
+    if motions:
+        db.save_shot_motion(conn, "v1", [
+            {"t_sec": t, "dx": 0.0, "dy": 0.0, "speed": sp,
+             "agreement": ag, "frames": 30, "movement": mv}
+            for t, mv, sp, ag in motions])
+    conn.commit()
+    return conn, path
+
+
+def test_a_size_is_matched_by_the_span_it_falls_in_not_by_equality():
+    # A size hangs off its representative frame, which sits *inside* the span.
+    # Matching on equality would leave almost every shot blank.
+    conn, path = _grammar_db(sizes=((2.4, "MCU"), (7.9, "LS")))
+    try:
+        g = inspector._shot_grammar(conn, "v1")
+        assert [r["size"] for r in g["rows"]] == ["MCU", "LS"]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_the_analysable_ratio_is_rendered_beside_the_codes():
+    # 40 of 94 labelled clips have no frame the vocabulary applies to. Codes
+    # without the ratio would present those as confidently as a clean one.
+    conn, path = _grammar_db(sizes=((2.4, "MCU"), (7.9, "UNKNOWN")))
+    try:
+        html = inspector._render_shot_grammar(
+            {"shot_grammar": inspector._shot_grammar(conn, "v1")})
+        assert 'data-i18n="analysable"' in html
+        assert "50% (1/2)" in html
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_mostly_unanalysable_clip_is_marked_not_just_numbered():
+    conn, path = _grammar_db(
+        sizes=((2.4, "UNKNOWN"), (7.9, "UNKNOWN")),
+        shots=((0, 0.0, 5.0), (1, 5.0, 10.0)))
+    try:
+        html = inspector._render_shot_grammar(
+            {"shot_grammar": inspector._shot_grammar(conn, "v1")})
+        assert "warn" in html
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_movement_class_carries_the_numbers_it_came_from():
+    # A class with no measurement under it is the shape this project keeps
+    # paying for; the page must not be where the evidence is dropped.
+    conn, path = _grammar_db(motions=((0.0, "camera_moves", 3.34, 0.72),))
+    try:
+        html = inspector._render_shot_grammar(
+            {"shot_grammar": inspector._shot_grammar(conn, "v1")})
+        assert "3.3 px" in html and "72%" in html
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_clip_with_neither_size_nor_movement_renders_no_block():
+    conn, path = _grammar_db()
+    try:
+        assert inspector._render_shot_grammar(
+            inspector._shot_grammar(conn, "v1")) == ""
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_hand_supplied_size_outranks_the_model_on_the_page():
+    conn, path = _grammar_db(sizes=((2.4, "MCU"),))
+    try:
+        db.save_shot_label(conn, "v1", 2.4, "shot_size", "CU", "supplied", None)
+        g = inspector._shot_grammar(conn, "v1")
+        assert g["rows"][0]["size"] == "CU"
+    finally:
+        conn.close(); os.unlink(path)
