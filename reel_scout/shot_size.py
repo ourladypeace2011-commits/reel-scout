@@ -114,6 +114,18 @@ def describe(code: Optional[str]) -> str:
 SOURCE_VLM = "vlm"
 SOURCE_DESCRIPTION = "description"
 
+#: A label the gate produced without the classifier ever running: the frame is a
+#: title card, an interface, a composite, or has no person in it.
+#:
+#: 🔴 **Not the same claim as a classifier `UNKNOWN`, and worth telling apart.**
+#: Both mean "no scale for this frame", so both count against the analysable
+#: ratio — but only the gate's rows can tell you later how often the gate
+#: rejected something it should have passed, which is its one measured weakness.
+#: Rows written before this constant existed carry `vlm`; the ratio therefore
+#: keys on the *value* being `UNKNOWN`, never on the source, so it stays correct
+#: over data written either way.
+SOURCE_GATE = "gate"
+
 #: The model may answer this when a frame has no subject to frame against — a
 #: title card, a graphic, black. Storing it is the point: "asked, no answer" and
 #: "never asked" are different states, and only one of them is worth re-running.
