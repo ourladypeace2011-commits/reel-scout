@@ -201,6 +201,21 @@ def representative_frames(conn, video_id: str) -> List[Tuple[Shot, Any]]:
 REFUSAL_UNPARSEABLE = "unparseable"
 REFUSAL_UNREACHABLE = "unreachable"
 REFUSAL_UNREADABLE = "unreadable"
+REFUSAL_INCONCLUSIVE = "inconclusive"
+
+# Refusals that say nothing about the frame: the model either never answered
+# or never had the room to. Only REFUSAL_UNPARSEABLE is a verdict -- the model
+# answered, at temperature 0, with something outside the vocabulary -- and a
+# verdict is the only thing that may retire a stored row. Everything else
+# leaves what is already there alone.
+INCONCLUSIVE_REFUSALS = (REFUSAL_UNREACHABLE, REFUSAL_UNREADABLE,
+                         REFUSAL_INCONCLUSIVE)
+
+# Each lands in the bucket that already means that thing, so the tally keeps
+# naming causes rather than growing a bucket per code path.
+_REFUSAL_BUCKET = {REFUSAL_UNREACHABLE: "unreachable",
+                   REFUSAL_UNREADABLE: "missing",
+                   REFUSAL_INCONCLUSIVE: "inconclusive"}
 
 
 def ask_subject_gate(image_path: str, model: str,
@@ -212,22 +227,33 @@ def ask_subject_gate(image_path: str, model: str,
     everything it rejects, the gate adds roughly 13% to the pass rather than
     doubling it.
     """
-    raw, why = _ollama(image_path, model, subject_gate_prompt(), 4, base_url)
+    raw, why, truncated = _ollama(image_path, model, subject_gate_prompt(), 4,
+                                  base_url)
     if why is not None:
         return None, why
     answer = parse_gate_answer(raw)
-    return (answer, None) if answer is not None else (None, REFUSAL_UNPARSEABLE)
+    if answer is not None:
+        return answer, None
+    return None, REFUSAL_INCONCLUSIVE if truncated else REFUSAL_UNPARSEABLE
 
 
 def _ollama(image_path: str, model: str, prompt: str, num_predict: int,
-            base_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """One image, one short answer. `(text, refusal)`; exactly one is None."""
+            base_url: Optional[str]
+            ) -> Tuple[Optional[str], Optional[str], bool]:
+    """One image, one short answer. `(text, refusal, truncated)`.
+
+    Exactly one of text/refusal is None. `truncated` says the reply stopped at
+    the token budget rather than because the model was finished. On its own
+    that is not a failure -- a four-token budget holds `MCU` comfortably --
+    but it changes what an unparseable reply means: we cut the model off, so
+    what came back is not its answer and must not be scored as one.
+    """
     url = (base_url or getattr(config, "OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
     try:
         with open(image_path, "rb") as f:
             img = base64.b64encode(f.read()).decode("utf-8")
     except OSError:
-        return None, REFUSAL_UNREADABLE
+        return None, REFUSAL_UNREADABLE, False
     body = json.dumps({
         "model": model, "prompt": prompt, "images": [img], "stream": False,
         # Reasoning models otherwise spend the whole budget thinking and answer
@@ -241,8 +267,22 @@ def _ollama(image_path: str, model: str, prompt: str, num_predict: int,
         with urllib.request.urlopen(req, timeout=300) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
-        return None, REFUSAL_UNREACHABLE
-    return payload.get("response"), None
+        return None, REFUSAL_UNREACHABLE, False
+    # A 200 is not by itself an answer. ollama returns 200 carrying its own
+    # error envelope, 200 with an empty string, and 200 with nothing but
+    # reasoning the budget cut off before any verdict -- and the vision path
+    # already had to learn exactly this (CHANGELOG 1.4.0: "a 200 response with
+    # no `response` field ... is not a generate response at all"). Handing any
+    # of them back as text makes the caller parse a non-answer, and the caller
+    # reports that as the model breaking the vocabulary. That verdict deletes
+    # rows, which is how a model that said nothing came to empty a library.
+    if payload.get("error"):
+        return None, REFUSAL_INCONCLUSIVE, False
+    text = payload.get("response")
+    truncated = payload.get("done_reason") == "length"
+    if not isinstance(text, str) or not text.strip():
+        return None, REFUSAL_INCONCLUSIVE, truncated
+    return text, None, truncated
 
 
 def classify_with_ollama(image_path: str, model: str,
@@ -251,15 +291,17 @@ def classify_with_ollama(image_path: str, model: str,
 
     The refusal says whether asking again could ever produce a different
     answer. `REFUSAL_UNPARSEABLE` means no — the constraint was stated and not
-    followed, at temperature 0. The other two are environment, and an
-    environment can be fixed.
+    followed, at temperature 0. The others are the environment or our own
+    token budget, and both of those can be fixed.
     """
-    raw, why = _ollama(image_path, model, classification_prompt(),
-                       _NUM_PREDICT, base_url)
+    raw, why, truncated = _ollama(image_path, model, classification_prompt(),
+                                  _NUM_PREDICT, base_url)
     if why is not None:
         return None, why
     code = parse_answer(raw)
-    return (code, None) if code else (None, REFUSAL_UNPARSEABLE)
+    if code:
+        return code, None
+    return None, REFUSAL_INCONCLUSIVE if truncated else REFUSAL_UNPARSEABLE
 
 
 def label_video(conn, video_id: str, model: str,
@@ -277,8 +319,9 @@ def label_video(conn, video_id: str, model: str,
     # -- blaming the model for a path problem is the exact conflation this
     # library keeps paying for, and it took one run to build a fresh one.
     tally: Dict[str, Any] = {"labelled": 0, "unknown": 0, "refused": 0,
-                             "unreachable": 0, "dropped": 0, "gated": 0,
-                             "skipped": 0, "missing": 0, "skipped_format": None}
+                             "unreachable": 0, "inconclusive": 0, "dropped": 0,
+                             "gated": 0, "skipped": 0, "missing": 0,
+                             "skipped_format": None}
     if not force:
         fmt = skip_reason(conn, video_id)
         if fmt:
@@ -304,8 +347,8 @@ def label_video(conn, video_id: str, model: str,
             refusal = None
             if gate:
                 applies, refusal = ask_subject_gate(path, model, base_url)
-                if refusal == REFUSAL_UNREACHABLE:
-                    tally["unreachable"] += 1
+                if refusal in INCONCLUSIVE_REFUSALS:
+                    tally[_REFUSAL_BUCKET[refusal]] += 1
                     continue
                 if applies is False:
                     source = SOURCE_GATE
@@ -321,10 +364,13 @@ def label_video(conn, video_id: str, model: str,
             if code is None:
                 code, refusal = classify_with_ollama(path, model, base_url)
             if code is None:
-                if refusal == REFUSAL_UNREACHABLE:
-                    # Environment, not verdict. Leave whatever is already
-                    # stored alone and let the next run decide.
-                    tally["unreachable"] += 1
+                if refusal in INCONCLUSIVE_REFUSALS:
+                    # Environment or our own token budget, not a verdict.
+                    # Leave whatever is already stored alone and let the next
+                    # run decide. A frame whose file vanished mid-run lands
+                    # here too: before, it fell through to `refused` and took
+                    # the stored label with it.
+                    tally[_REFUSAL_BUCKET[refusal]] += 1
                     continue
                 tally["refused"] += 1
                 # A frame the current prompt cannot answer, still holding an
