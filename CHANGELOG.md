@@ -4,6 +4,81 @@
 
 ### Fixed
 
+- **A zoom was reported as a locked-off camera, with high confidence.**
+  `motion` read `motion_x`/`motion_y` and took their median, which measures
+  *translation* and nothing else. The vector field of a push-in is radial and
+  the field of a rotation is tangential, and **both have a median of exactly
+  (0, 0)** — so a shot that ended 45% tighter came back as `speed 0.00,
+  agreement 0.93` and was classified `static`. Not `unknown`: the wrong class,
+  carrying a confidence number. Punch-in and Ken Burns are among the most
+  common moves in short-form video, so `STATIC 1851/3468 (53%)` could not be
+  read at all — nobody knew how much of it was zoom.
+
+  The module's own docstring said it was using "positions *and* motions, which
+  is what makes the two cases separable". It had never read a position.
+
+  Each frame is now fitted with a similarity transform — translation, scale,
+  rotation — over the block displacements. Measured on synthetic clips, through
+  the shipped code path and a storage round-trip:
+
+  | clip | before | after |
+  |---|---|---|
+  | 45% push-in | `static` | `camera_moves`, zoom +7.7% |
+  | 200% push-in | `still_subject_moves` | `camera_moves`, zoom +72.6% |
+  | 51.6° rotation | `static` | `camera_moves`, rotation +14.2° |
+  | 80 px/s pan | `camera_moves` | `camera_moves`, zoom **+0.0%** |
+  | locked off | `static` | `static` |
+  | subject over 70% of frame | `static` | `static` |
+
+  Two decisions inside the fit, each taken against a measurement rather than a
+  preference:
+
+  - **Outliers are dropped and the fit repeated.** On a pan the leading edge
+    of the frame has no reference content, and one least squares reads those
+    junk vectors as scale: a pure pan fitted **-11.8% zoom and +9.6°**, which
+    is *larger* than a real 45% push-in measures. Any threshold above that
+    noise would have been above the signal too.
+  - **The inlier set is seeded from the median, then grown by the fit's own
+    tolerance.** Seeding, because least squares has no majority rule — thirty
+    still blocks and twenty moving 6 px, which is the definition of
+    `still_subject_moves`, fitted a translation of **2.50** and would have been
+    reported as a camera move. Growing, because a zoom's blocks disagree with
+    the median *by construction*, so seeding alone would discard the signal
+    being looked for.
+
+  ⚠️ **The magnitudes are a floor, not a reading.** A 45% push-in measures
+  +7.7% and a 200% one +72.6%: the encoder quantises a sub-pixel displacement
+  to a zero vector, and seeding costs more of it. The number answers "did the
+  frame transform beyond translation, and roughly how much", not "by exactly
+  how much". Seeding was chosen knowing it costs magnitude, because a fit that
+  a moving subject can pull is the worse failure — it turns a still camera into
+  a camera move, which is a claim about the filmmaker.
+
+### Changed
+
+- Schema **v19**: `shot_motion` gains `zoom` and `rotation`. Rows written
+  before it get NULL, not 0.0 — a zero would claim the shot was checked for
+  zoom and found to have none, which is a different statement from not having
+  looked. `dx`/`dy` keep the codec's direction, unchanged, so v18 and v19 rows
+  stay comparable; only the new columns use the reader's convention, where a
+  positive `zoom` means the frame got tighter.
+- `frame_motion()` yields six values per frame instead of four, and
+  `classify()` takes the shot's total zoom and rotation as optional arguments.
+  `agreement` now means "the share of blocks the fit explains" rather than "the
+  share matching one translation" — which is why a fast push-in stops reading
+  as handheld.
+- `dx`/`dy` arrive from a least squares solve rather than a median, so they
+  are no longer bit-exact: 4.0 comes back as 3.999999999999997.
+
+### Notes
+
+- `ZOOM_FLOOR` (3%) and `ROTATION_FLOOR` (3°) are totals **across the shot**,
+  not per frame — half a second at the same rate changes no framing a viewer
+  would call a move. Both are set from four synthetic clips, two true and two
+  false: a thinner base than `SPEED_FLOOR`, which sits on a measured hard zero,
+  and stated so the next person can widen them rather than trust them.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05), B3.
+
 - **The gate and the classifier stored side by side, so a re-run never
   converged.** They are two questions in one asking, but they wrote under
   different `source` values — and `source` is part of the unique key, so

@@ -81,13 +81,42 @@ _MV_DTYPE = np.dtype({
     "itemsize": 40, "aligned": True})
 
 
-def _mvs(motions, scale=4):
+#: The fixture frame. Blocks are placed inside it because the fit reads
+#: positions -- a fixture leaving every block at (0, 0) cannot tell a
+#: translation from a scale, and would have let the zoom bug through again.
+_W, _H = 640, 360
+
+
+def _grid(n):
+    """`n` block centres spread over the fixture frame."""
+    cols = int(np.ceil(np.sqrt(n)))
+    rows = int(np.ceil(n / cols))
+    return [(int((i % cols + 0.5) * _W / cols),
+             int((i // cols + 0.5) * _H / rows)) for i in range(n)]
+
+
+def _mvs(motions, scale=4, positions=None):
     a = np.zeros(len(motions), dtype=_MV_DTYPE)
     a["source"] = -1
     a["motion_scale"] = scale
+    pos = positions if positions is not None else _grid(len(motions))
+    a["dst_x"] = [p[0] for p in pos]
+    a["dst_y"] = [p[1] for p in pos]
     a["motion_x"] = [int(round(mx * scale)) for mx, _ in motions]
     a["motion_y"] = [int(round(my * scale)) for _, my in motions]
     return a
+
+
+def _radial(n, rate):
+    """Blocks on the grid with a radial field, whose median is exactly (0, 0).
+
+    A **positive** `rate` points the vectors outward. That is the codec coding
+    a frame that got *wider*: its vectors run from the current block back to
+    its reference, so content the frame is pushing in on has its reference
+    nearer the centre, not further from it. A push-in is a negative rate.
+    """
+    pos = _grid(n)
+    return pos, [((x - _W / 2.0) * rate, (y - _H / 2.0) * rate) for x, y in pos]
 
 
 class _Side:
@@ -99,8 +128,10 @@ class _Side:
 
 
 class _Frame:
-    def __init__(self, pts, arr):
+    def __init__(self, pts, arr, width=_W, height=_H):
         self.pts = pts
+        self.width = width
+        self.height = height
         self.side_data = {"MOTION_VECTORS": _Side(arr)} if arr is not None else {}
 
 
@@ -146,9 +177,17 @@ def test_a_pan_reads_as_one_motion_every_block_agrees_with():
     frames = [_Frame(2, _mvs([(4.0, 0.0)] * 50))]
     with patch.dict(sys.modules, _fake_av(frames)):
         out = list(motion.frame_motion("f.mp4"))
-    (t, dx, dy, agree), = out
-    assert (t, dx, dy) == (1.0, 4.0, 0.0)
+    (t, dx, dy, zoom, rot, agree), = out
+    # approx, not equality: since 2026-09-05 these come out of a least squares
+    # solve rather than a median, so 4.0 arrives as 3.999999999999997. The
+    # tolerance is for the solver, not for the measurement.
+    assert t == 1.0
+    assert (dx, dy) == pytest.approx((4.0, 0.0), abs=1e-9)
     assert agree == 1.0
+    # And the fit does not invent a zoom out of a pure translation -- one
+    # least squares put a real pan at -11.8%, which is why it refits.
+    assert zoom == pytest.approx(0.0, abs=1e-9)
+    assert rot == pytest.approx(0.0, abs=1e-9)
 
 
 def test_one_moving_element_leaves_the_median_still_and_drops_agreement():
@@ -156,10 +195,10 @@ def test_one_moving_element_leaves_the_median_still_and_drops_agreement():
     # could not distinguish from a pan.
     frames = [_Frame(0, _mvs([(0.0, 0.0)] * 30 + [(6.0, 0.0)] * 20))]
     with patch.dict(sys.modules, _fake_av(frames)):
-        (_, dx, dy, agree), = list(motion.frame_motion("f.mp4"))
-    assert (dx, dy) == (0.0, 0.0)
-    assert agree == pytest.approx(0.6)
-    assert motion.classify(0.0, agree) != motion.CAMERA_MOVES
+        (_, dx, dy, zoom, rot, agree), = list(motion.frame_motion("f.mp4"))
+    assert (dx, dy) == pytest.approx((0.0, 0.0), abs=0.5)
+    assert agree == pytest.approx(0.6, abs=0.05)
+    assert motion.classify(0.0, agree, zoom, rot) != motion.CAMERA_MOVES
 
 
 def test_an_intra_frame_is_skipped_not_counted_as_still():
@@ -168,7 +207,7 @@ def test_an_intra_frame_is_skipped_not_counted_as_still():
     frames = [_Frame(0, None), _Frame(2, _mvs([(4.0, 0.0)] * 10))]
     with patch.dict(sys.modules, _fake_av(frames)):
         out = list(motion.frame_motion("f.mp4"))
-    assert len(out) == 1 and out[0][1] == 4.0
+    assert len(out) == 1 and out[0][1] == pytest.approx(4.0)
 
 
 def test_motion_is_read_in_pixels_not_quarter_pixels():
@@ -176,8 +215,103 @@ def test_motion_is_read_in_pixels_not_quarter_pixels():
     # moving four times as fast as it does.
     frames = [_Frame(0, _mvs([(3.0, 0.0)] * 10, scale=4))]
     with patch.dict(sys.modules, _fake_av(frames)):
-        (_, dx, _, _), = list(motion.frame_motion("f.mp4"))
-    assert dx == 3.0
+        (_, dx, _, _, _, _), = list(motion.frame_motion("f.mp4"))
+    assert dx == pytest.approx(3.0)
+
+
+# --- the field a median cannot see (2026-09-05) ------------------------------
+#
+# A push-in's vectors point outward from centre and a rotation's point around
+# it. Both fields have a median of exactly (0, 0), so `speed 0.00` was read as
+# "the camera is locked off" -- confidently, and wrongly. Measured on synthetic
+# clips before the fix: a 45% push-in and a 51.6 deg rotation both classified
+# `static`, the 45% one at agreement 0.93.
+
+@pytest.mark.parametrize("rate, sign, label", [
+    (-0.01, +1, "push-in: inward vectors, frame gets tighter"),
+    (+0.01, -1, "pull-out: outward vectors, frame gets wider"),
+])
+def test_a_zoom_is_not_a_still_camera(rate, sign, label):
+    pos, motions = _radial(64, rate)
+    frames = [_Frame(0, _mvs(motions, positions=pos))]
+    with patch.dict(sys.modules, _fake_av(frames)):
+        (_, dx, dy, zoom, rot, agree), = list(motion.frame_motion("f.mp4"))
+    # The old pair still says "not moving" -- that is the bug, preserved here
+    # so the next reader can see what the new numbers are for.
+    assert (dx, dy) == pytest.approx((0.0, 0.0), abs=0.05), label
+    assert motion.classify(0.0, agree) == motion.STATIC, label
+    # The fit sees it, and reports it in the reader's direction rather than
+    # the codec's: positive means the frame got tighter.
+    assert zoom * sign > 0, label
+    assert abs(zoom) == pytest.approx(0.01, rel=0.05), label
+    assert rot == pytest.approx(0.0, abs=1e-6), label
+    assert motion.classify(0.0, agree, zoom * 20, rot) == motion.CAMERA_MOVES
+
+
+def test_a_rotation_is_not_a_still_camera():
+    pos = _grid(64)
+    motions = [(-(y - _H / 2.0) * 0.01, (x - _W / 2.0) * 0.01) for x, y in pos]
+    frames = [_Frame(0, _mvs(motions, positions=pos))]
+    with patch.dict(sys.modules, _fake_av(frames)):
+        (_, dx, dy, zoom, rot, agree), = list(motion.frame_motion("f.mp4"))
+    assert (dx, dy) == pytest.approx((0.0, 0.0), abs=0.05)
+    assert motion.classify(0.0, agree) == motion.STATIC
+    assert abs(rot) == pytest.approx(0.01, rel=0.05)
+    assert zoom == pytest.approx(0.0, abs=1e-3)
+    assert motion.classify(0.0, agree, zoom, rot * 20) == motion.CAMERA_MOVES
+
+
+def test_a_moving_subject_does_not_pull_the_fit_into_a_camera_move():
+    # The regression the median-seeding exists to prevent. Unseeded, this same
+    # field fits a translation of 2.50 -- and 2.50 with high agreement is a
+    # camera move, so a still camera with a subject walking through it would
+    # have been reported as one.
+    pos = _grid(50)
+    motions = [(0.0, 0.0)] * 30 + [(6.0, 0.0)] * 20
+    frames = [_Frame(0, _mvs(motions, positions=pos))]
+    with patch.dict(sys.modules, _fake_av(frames)):
+        (_, dx, dy, zoom, rot, agree), = list(motion.frame_motion("f.mp4"))
+    assert (dx, dy) == pytest.approx((0.0, 0.0), abs=1e-6)
+    assert zoom == pytest.approx(0.0, abs=1e-6)
+    assert motion.classify(0.0, agree, zoom, rot) != motion.CAMERA_MOVES
+
+
+def test_a_pan_is_not_given_a_zoom_it_does_not_have():
+    # The false positive that decided the fit had to reject outliers: a single
+    # least squares put a pure pan at -11.8% zoom and +9.6 deg rotation, which
+    # is *larger* than a real 45% push-in measures (+7.1%). A threshold set
+    # above that noise would have been above the signal too.
+    pos = _grid(64)
+    frames = [_Frame(0, _mvs([(4.0, 0.0)] * 64, positions=pos))]
+    with patch.dict(sys.modules, _fake_av(frames)):
+        (_, dx, _, zoom, rot, _), = list(motion.frame_motion("f.mp4"))
+    assert dx == pytest.approx(4.0)
+    assert zoom == pytest.approx(0.0, abs=1e-9)
+    assert rot == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_floors_admit_a_zoom_with_no_translation_at_all():
+    assert motion.classify(0.0, 0.9, zoom=0.10) == motion.CAMERA_MOVES
+    assert motion.classify(0.0, 0.9, rotation=0.25) == motion.CAMERA_MOVES
+    # And do not admit noise: a shot that neither travels nor transforms is
+    # still locked off, which is the reading the floors have to keep earning.
+    assert motion.classify(0.0, 0.9, zoom=0.01, rotation=0.01) == motion.STATIC
+
+
+def test_a_shot_compounds_its_zoom_across_the_frames_it_holds():
+    # Across the shot, not per frame: half a second at the same rate changes
+    # nothing a viewer would call a camera move, so the threshold has to sit
+    # on the total.
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, shots=((0, 0.0, 5.0),))
+        frames = [(0.1 * i, 0.0, 0.0, 0.01, 0.0, 0.9) for i in range(20)]
+        with patch.object(motion, "frame_motion", return_value=iter(frames)):
+            rows = motion.shot_motion(conn, vid, "f.mp4")
+        assert rows[0]["zoom"] == pytest.approx(1.01 ** 20 - 1)
+        assert rows[0]["movement"] == motion.CAMERA_MOVES
+    finally:
+        conn.close(); os.unlink(path)
 
 
 def test_a_missing_decoder_says_which_extra_to_install():
@@ -193,7 +327,7 @@ def test_a_shot_with_too_few_coded_frames_is_unknown_not_guessed():
     conn, path = _temp_db()
     try:
         vid = _clip(conn, shots=((0, 0.0, 5.0),))
-        few = [(0.1 * i, 5.0, 0.0, 0.9) for i in range(motion.MIN_FRAMES - 1)]
+        few = [(0.1 * i, 5.0, 0.0, 0.0, 0.0, 0.9) for i in range(motion.MIN_FRAMES - 1)]
         with patch.object(motion, "frame_motion", return_value=iter(few)):
             rows = motion.shot_motion(conn, vid, "f.mp4")
         assert rows[0]["movement"] == motion.UNKNOWN
@@ -209,8 +343,8 @@ def test_a_few_large_jumps_do_not_carry_the_shot():
     conn, path = _temp_db()
     try:
         vid = _clip(conn, shots=((0, 0.0, 5.0),))
-        frames = [(0.1 * i, 0.0, 0.0, 0.9) for i in range(17)]
-        frames += [(0.1 * (17 + i), 40.0, 0.0, 0.9) for i in range(3)]
+        frames = [(0.1 * i, 0.0, 0.0, 0.0, 0.0, 0.9) for i in range(17)]
+        frames += [(0.1 * (17 + i), 40.0, 0.0, 0.0, 0.0, 0.9) for i in range(3)]
         with patch.object(motion, "frame_motion", return_value=iter(frames)):
             rows = motion.shot_motion(conn, vid, "f.mp4")
         assert rows[0]["speed"] == 0.0
@@ -226,7 +360,8 @@ def test_the_frame_type_rhythm_is_tolerated_not_filtered():
     conn, path = _temp_db()
     try:
         vid = _clip(conn, shots=((0, 0.0, 5.0),))
-        swing = [(0.1 * i, 0.0, 0.0, 0.95 if i % 2 else 0.10) for i in range(20)]
+        swing = [(0.1 * i, 0.0, 0.0, 0.0, 0.0, 0.95 if i % 2 else 0.10)
+                 for i in range(20)]
         with patch.object(motion, "frame_motion", return_value=iter(swing)):
             rows = motion.shot_motion(conn, vid, "f.mp4")
         assert rows[0]["agreement"] == pytest.approx(0.525)
@@ -238,8 +373,8 @@ def test_frames_are_bound_to_the_shot_whose_span_contains_them():
     conn, path = _temp_db()
     try:
         vid = _clip(conn)   # 0-5 and 5-10
-        frames = ([(0.1 * i, 0.0, 0.0, 0.9) for i in range(20)] +
-                  [(5.0 + 0.1 * i, 6.0, 0.0, 0.9) for i in range(20)])
+        frames = ([(0.1 * i, 0.0, 0.0, 0.0, 0.0, 0.9) for i in range(20)] +
+                  [(5.0 + 0.1 * i, 6.0, 0.0, 0.0, 0.0, 0.9) for i in range(20)])
         with patch.object(motion, "frame_motion", return_value=iter(frames)):
             rows = motion.shot_motion(conn, vid, "f.mp4")
         assert [r["movement"] for r in rows] == [motion.STATIC,

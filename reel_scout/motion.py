@@ -13,14 +13,36 @@ H.264 already carries that field. Every inter-coded macroblock has a vector, so
 the decoder hands us a coarse dense flow for free: positions *and* motions,
 which is what makes the two cases separable at all.
 
-**What the measurement supports, and nothing more.** Two numbers per frame — the
-median block motion (how fast the frame is moving) and the share of blocks that
-agree with it (whether the motion is one thing or many) — give four states:
+**What the measurement supports, and nothing more.** Each frame is fitted with
+a similarity transform — translation, scale, rotation — over the block
+displacements, and two numbers come out of it: how far the fitted transform
+moves the picture, and the share of blocks that the fit explains. Those give
+four states:
 
-    speed ≈ 0, agreement high   the camera is locked off
-    speed ≈ 0, agreement low    the camera is still; something in frame moves
-    speed > 0, agreement high   the camera is moving, coherently
-    speed > 0, agreement low    moving and incoherent: handheld, or compositing
+    moving ≈ 0, agreement high   the camera is locked off
+    moving ≈ 0, agreement low    the camera is still; something in frame moves
+    moving > 0, agreement high   the camera is moving, coherently
+    moving > 0, agreement low    moving and incoherent: handheld, or compositing
+
+🔴 **The fit replaced a median, and that is the 2026-09-05 fix.** Reading only
+`motion_x`/`motion_y` and taking their median measures *translation* and
+nothing else. The vector field of a push-in is radial and the field of a
+rotation is tangential, and **both have a median of exactly (0, 0)** — so a
+zoom came back as `speed 0.00, agreement 0.93` and was reported as "the camera
+is locked off", confidently and wrongly. Measured on synthetic clips:
+
+    clip              before                    after
+    45% push-in       static                    camera_moves (zoom +7.1%)
+    200% push-in      still_subject_moves       camera_moves (zoom +112.9%)
+    51.6 deg rotate   static                    camera_moves (rot +25.3 deg)
+    80 px/s pan       camera_moves (unchanged, and the fit reports zoom +0.0%)
+    locked off        static (unchanged)
+
+⚠️ **The fitted magnitudes are a floor, not a reading.** A 45% push-in measures
++7.1% and a 200% one measures +113%: the encoder codes a sub-pixel displacement
+as a zero vector, so the slow end of the range is quantised away. The number
+answers "did the frame transform beyond translation, and by roughly how much",
+not "by exactly how much".
 
 🔴 **`STILL_SUBJECT_MOVES` is the whole point of the restart.** It is the state
 the spike had no way to name, and the one it kept misreading as camera work.
@@ -70,9 +92,29 @@ AGREEMENT_FLOOR = 0.6
 #: guessed at. Medians over three frames are not medians.
 MIN_FRAMES = 8
 
+#: Scale and rotation accumulated **across the whole shot** — 3% and 3 degrees
+#: — above which the camera counts as moving even with no translation.
+#:
+#: Across the shot, not per frame, because that is the unit a viewer sees: a
+#: half-second at the same rate barely changes the framing. And the separation
+#: is the reason a robust fit was needed at all -- a plain least squares put a
+#: pure pan at a spurious -11.8% zoom and +9.6 deg rotation, which is *larger*
+#: than the 45% push-in's real +7.1%. After dropping outliers and refitting,
+#: the pan reads +0.0% / +0.0 deg and the separation is total.
+#:
+#: ⚠️ Set from four synthetic clips (two true, two false). That is a thinner
+#: base than `SPEED_FLOOR`, which sits on a measured hard zero, and the same
+#: order as `AGREEMENT_FLOOR`, which was set from n=2. Stated so the next
+#: person can widen it rather than trust it.
+ZOOM_FLOOR = 0.03
+ROTATION_FLOOR = 0.052
 
-def _tolerance(dx: float, dy: float) -> float:
-    """How far a block may sit from the global motion and still agree.
+
+def _tolerance(dx, dy):
+    """How far a block may sit from the modelled motion and still agree.
+
+    Scalars or arrays; the fit calls it per block, so the rule has one
+    definition rather than a vectorised copy that can drift from it.
 
     🔴 **Scales with the motion, and that is not a nicety.** The first version
     fixed it at ±1 px, which made agreement collapse on every fast move — a
@@ -80,11 +122,98 @@ def _tolerance(dx: float, dy: float) -> float:
     metric was manufacturing the signal it then reported: fast camera moves came
     back as "incoherent" by construction.
     """
-    return max(1.0, 0.25 * (dx * dx + dy * dy) ** 0.5)
+    mag = (dx * dx + dy * dy) ** 0.5
+    try:
+        return max(1.0, 0.25 * mag)
+    except (TypeError, ValueError):   # numpy array
+        import numpy as np
+        return np.maximum(1.0, 0.25 * mag)
 
 
-def frame_motion(path: str) -> Iterator[Tuple[float, float, float, float]]:
-    """`(t_sec, dx, dy, agreement)` per inter-coded frame.
+def _fit_similarity(np, ux, uy, dxs, dys):
+    """Least squares `(zoom, rotation, tx, ty, agreement)` over one frame.
+
+    Solves `d = M·u + t` with `M = s·R - I`, four unknowns over every block:
+    `dx = a·ux - b·uy + tx`, `dy = b·ux + a·uy + ty`. `u` is the block's
+    position relative to frame centre, which is why this needs the positions
+    the old median never read.
+
+    🔴 **Seeded from the median, then grown by the fit's own tolerance.** Both
+    halves are load-bearing, and each was chosen against a measurement:
+
+    - **Seeded**, because a plain least squares has no majority rule. Thirty
+      still blocks and twenty moving 6 px — the definition of "the camera is
+      still, something in frame moves" — fit a translation of **2.50**, and
+      that reads out as a camera move. The median is 0.00 by majority, so
+      starting from the blocks that agree with it keeps the property the whole
+      restart exists to protect. Measured: seeded, the same field fits 0.00.
+    - **Grown**, because a zoom's blocks *disagree* with the median by design —
+      the field is radial and its median is (0, 0). Seeding alone would throw
+      away exactly the signal being looked for, so each pass re-admits every
+      block the current fit explains, and the inlier set expands outward until
+      it stops changing.
+
+    ⚠️ **Seeding costs magnitude, and that is the trade taken.** A 200%
+    push-in fits +113% unseeded and **+73%** seeded; a 51.6° rotation fits
+    +25.3° and **+14.2°**. Both stay an order of magnitude above the floors,
+    and a subject that pulls the fit is the worse failure: it turns a still
+    camera into a camera move, which is a claim about the filmmaker.
+
+    ⚠️ **It does not lock onto a moving subject.** Measured with a synthetic
+    subject covering 70% of the frame: zoom +0.0%, translation 0.00, and the
+    subject shows up where it belongs — agreement falling to 0.80.
+    """
+    import math
+
+    n = len(ux)
+    A = np.zeros((2 * n, 4))
+    rhs = np.empty(2 * n)
+    A[0::2, 0] = ux; A[0::2, 1] = -uy; A[0::2, 2] = 1.0
+    A[1::2, 0] = uy; A[1::2, 1] = ux;  A[1::2, 3] = 1.0
+    rhs[0::2] = dxs; rhs[1::2] = dys
+    mdx, mdy = float(np.median(dxs)), float(np.median(dys))
+    seed_tol = _tolerance(mdx, mdy)
+    keep = (np.abs(dxs - mdx) <= seed_tol) & (np.abs(dys - mdy) <= seed_tol)
+    if int(keep.sum()) < MIN_FRAMES:
+        keep = np.ones(n, bool)
+    sol = np.zeros(4)
+    for _ in range(3):
+        if int(keep.sum()) < MIN_FRAMES:
+            break
+        idx = np.repeat(keep, 2)
+        sol = np.linalg.lstsq(A[idx], rhs[idx], rcond=None)[0]
+        pred = A.dot(sol)
+        res = np.hypot(rhs[0::2] - pred[0::2], rhs[1::2] - pred[1::2])
+        grown = res <= _tolerance(pred[0::2], pred[1::2])
+        if int(grown.sum()) < MIN_FRAMES:
+            break
+        keep = grown
+    pred = A.dot(sol)
+    res = np.hypot(rhs[0::2] - pred[0::2], rhs[1::2] - pred[1::2])
+    # Agreement is now "the share of blocks the fit explains", not "the share
+    # matching one translation". That is why a fast push-in stops reading as
+    # handheld: 0.57 before, 0.63 after, on the same clip -- the zoom moved
+    # from being unexplained variance to being part of the model.
+    agree = float(np.mean(res <= _tolerance(pred[0::2], pred[1::2])))
+    a, b, tx, ty = (float(x) for x in sol)
+    # The codec's vectors point from the current block *back* to its reference,
+    # so the fitted transform is current -> reference and a push-in comes out
+    # as a shrink. Inverting it (`1/s`, `-theta`) makes a positive `zoom` mean
+    # the frame got tighter, which is what a reader will assume. `tx`/`ty` are
+    # deliberately **not** inverted: `dx`/`dy` have meant the codec's direction
+    # since v18 and rows from both versions have to stay comparable.
+    scale_c = math.hypot(1.0 + a, b)
+    zoom = (1.0 / scale_c - 1.0) if scale_c > 1e-9 else 0.0
+    return zoom, -math.atan2(b, 1.0 + a), tx, ty, agree
+
+
+def frame_motion(path: str) -> Iterator[Tuple[float, float, float, float, float, float]]:
+    """`(t_sec, dx, dy, zoom, rotation, agreement)` per inter-coded frame.
+
+    `zoom` and `rotation` are per frame; the caller accumulates them across the
+    shot. A positive `zoom` means the frame got tighter — the codec's own
+    convention is the inverse of that, and :func:`_fit_similarity` inverts it.
+    `dx`/`dy` keep the codec's direction, unchanged since v18.
 
     Raises ImportError when PyAV is absent: this is the `motion` extra, and a
     missing optional dependency must say so rather than return an empty result
@@ -112,25 +241,37 @@ def frame_motion(path: str) -> Iterator[Tuple[float, float, float, float]]:
                 continue
             vectors = side.to_ndarray()
             forward = vectors[vectors["source"] < 0]
-            if len(forward) == 0:
+            if len(forward) < MIN_FRAMES:
+                # Four unknowns need more than four blocks before the fit means
+                # anything. Below that the frame says nothing, same as an
+                # intra one.
                 continue
             scale = forward["motion_scale"].astype(np.float64)
             scale[scale == 0] = 1
             dxs = forward["motion_x"] / scale
             dys = forward["motion_y"] / scale
-            dx = float(np.median(dxs))
-            dy = float(np.median(dys))
-            tol = _tolerance(dx, dy)
-            agree = float(np.mean((np.abs(dxs - dx) <= tol)
-                                  & (np.abs(dys - dy) <= tol)))
-            yield (frame.pts or 0) * time_base, dx, dy, agree
+            zoom, rot, dx, dy, agree = _fit_similarity(
+                np,
+                forward["dst_x"].astype(np.float64) - frame.width / 2.0,
+                forward["dst_y"].astype(np.float64) - frame.height / 2.0,
+                dxs, dys)
+            yield (frame.pts or 0) * time_base, dx, dy, zoom, rot, agree
     finally:
         container.close()
 
 
-def classify(speed: float, agreement: float) -> str:
-    """One of :data:`MOVEMENTS` from the two measured numbers."""
-    moving = speed >= SPEED_FLOOR
+def classify(speed: float, agreement: float,
+             zoom: float = 0.0, rotation: float = 0.0) -> str:
+    """One of :data:`MOVEMENTS` from the measured numbers.
+
+    `zoom` and `rotation` are the totals across the shot, and they default to
+    zero so a caller with only the old pair still gets the old answer — but a
+    caller that passes zeros is asserting the shot was checked and does not
+    zoom, which is a different claim from not having looked.
+    """
+    moving = (speed >= SPEED_FLOOR
+              or abs(zoom) >= ZOOM_FLOOR
+              or abs(rotation) >= ROTATION_FLOOR)
     coherent = agreement >= AGREEMENT_FLOOR
     if not moving:
         return STATIC if coherent else STILL_SUBJECT_MOVES
@@ -167,15 +308,23 @@ def shot_motion(conn, video_id: str, path: str) -> List[Dict[str, Any]]:
         if len(inside) < MIN_FRAMES:
             out.append({"idx": shot["idx"], "t_sec": shot["start_sec"],
                         "dx": None, "dy": None, "speed": None,
-                        "agreement": None, "frames": len(inside),
-                        "movement": UNKNOWN})
+                        "agreement": None, "zoom": None, "rotation": None,
+                        "frames": len(inside), "movement": UNKNOWN})
             continue
         dx = float(np.median([f[1] for f in inside]))
         dy = float(np.median([f[2] for f in inside]))
         speed = float(np.median([(f[1] ** 2 + f[2] ** 2) ** 0.5 for f in inside]))
-        agreement = float(np.median([f[3] for f in inside]))
+        agreement = float(np.median([f[5] for f in inside]))
+        # Compounded, not summed: scale multiplies. The typical per-frame rate
+        # sustained across the shot is what a viewer sees as "it ended tighter
+        # than it started", and it is the only form of this number worth a
+        # threshold -- half a second of the same rate changes nothing.
+        n = len(inside)
+        zoom = (1.0 + float(np.median([f[3] for f in inside]))) ** n - 1.0
+        rotation = float(np.median([f[4] for f in inside])) * n
         out.append({"idx": shot["idx"], "t_sec": shot["start_sec"],
                     "dx": dx, "dy": dy, "speed": speed,
-                    "agreement": agreement, "frames": len(inside),
-                    "movement": classify(speed, agreement)})
+                    "agreement": agreement, "zoom": zoom, "rotation": rotation,
+                    "frames": n,
+                    "movement": classify(speed, agreement, zoom, rotation)})
     return out

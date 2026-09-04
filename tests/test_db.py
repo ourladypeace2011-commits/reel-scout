@@ -736,6 +736,37 @@ def test_migration_creates_shots_on_a_v13_database():
         os.unlink(path)
 
 
+def test_a_v18_database_gains_zoom_and_rotation_without_claiming_a_reading():
+    # v18 stored only dx/dy, so rows written then were never checked for zoom.
+    # They must come back NULL rather than 0.0: a zero would claim the shot was
+    # measured and found not to scale, which is the exact confusion this
+    # migration exists to end.
+    conn, path = _temp_db()
+    try:
+        vid = db.upsert_video(conn, "youtube", "z1", "https://yt/z1", title="Z1")
+        for name in ("zoom", "rotation"):
+            conn.execute("ALTER TABLE shot_motion DROP COLUMN %s" % name)
+        conn.execute("UPDATE schema_version SET version = 18")
+        conn.commit()
+        conn.execute("INSERT INTO shot_motion (video_id, t_sec, dx, dy, speed, "
+                     "agreement, frames, movement) "
+                     "VALUES (?, 0.0, 0.0, 0.0, 0.0, 0.93, 30, 'static')", (vid,))
+        conn.commit()
+        db.init_db(conn)
+        assert (conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == db.SCHEMA_VERSION)
+        row = db.get_shot_motion(conn, vid)[0]
+        assert row["zoom"] is None and row["rotation"] is None
+        assert row["movement"] == "static"
+        # Idempotent: the ladder must survive being run twice.
+        db._migrate_v18_to_v19(conn)
+        db.init_db(conn)
+        assert len(db.get_shot_motion(conn, vid)) == 1
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
 def test_migration_is_idempotent():
     conn, path = _temp_db()
     try:
