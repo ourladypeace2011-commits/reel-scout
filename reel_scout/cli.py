@@ -851,10 +851,10 @@ def _cmd_shot_size(args) -> None:
         conn.close()
         return
     print("shot sizes: %d labelled, %d UNKNOWN (%d gated), %d refused, "
-          "%d unreachable, %d dropped, %d skipped, %d missing"
+          "%d unreachable, %d inconclusive, %d dropped, %d skipped, %d missing"
           % (tally["labelled"], tally["unknown"], tally["gated"],
-             tally["refused"], tally["unreachable"], tally["dropped"],
-             tally["skipped"], tally["missing"]))
+             tally["refused"], tally["unreachable"], tally["inconclusive"],
+             tally["dropped"], tally["skipped"], tally["missing"]))
     if tally["missing"]:
         print("  missing = the keyframe file could not be read (paths in this DB "
               "are relative to the checkout that wrote them) — not a model problem",
@@ -878,6 +878,19 @@ def _cmd_shot_size(args) -> None:
         # tell which run to repeat.
         print("  unreachable = ollama did not answer — environment, not verdict; "
               "this run is worth repeating", file=sys.stderr)
+    if tally["inconclusive"]:
+        # The third cause, and the one that used to be counted as `refused`:
+        # ollama replied 200 with an error envelope, an empty string, or
+        # nothing but reasoning the token budget cut off. `refused` claims the
+        # model answered and broke the vocabulary, and that claim is what
+        # retires a stored label -- so a model that said nothing was emptying
+        # the table it was supposed to be filling.
+        print("  inconclusive = %d frame(s) came back with no answer at all "
+              "(error envelope, empty reply, or the budget ran out before a "
+              "verdict). Nothing was removed. Try a model that answers this "
+              "prompt — qwen3-vl:8b returns an empty string for both questions "
+              "here — or raise the token budget" % tally["inconclusive"],
+              file=sys.stderr)
     if tally["dropped"]:
         print("  dropped = %d label(s) from a retired prompt sat on frames this "
               "prompt cannot answer, so they were removed rather than left "

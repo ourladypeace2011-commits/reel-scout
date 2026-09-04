@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A model that answered nothing was deleting labels.** `shot-size` read every
+  HTTP 200 from ollama as text. ollama returns 200 carrying its own `error`
+  envelope, 200 with an empty string, and 200 with nothing but reasoning the
+  token budget cut off before any verdict — none of which is an answer. The
+  caller parsed the non-answer, failed, and reported `REFUSAL_UNPARSEABLE`:
+  *the model answered and broke the vocabulary*. That is the one verdict
+  allowed to retire a stored label, so `drop_superseded_label` ran and the row
+  went. Measured 2026-09-05: **`qwen3-vl:8b`, which wrote 2593 of this
+  library's vision descriptions, returns an empty string for both the gate and
+  the classifier** — so re-running `shot-size` with it after any prompt change
+  would have emptied the table rather than refilled it. Nothing was lost yet
+  only because all 827 stored labels still carry the current fingerprint.
+
+  A non-answer is now `REFUSAL_INCONCLUSIVE` and leaves stored rows alone,
+  alongside `unreachable`. Two boundaries came with it, because the useful
+  distinction is narrow and easy to overshoot in either direction:
+
+  - A reply that stopped at the token budget is only inconclusive **if it also
+    failed to parse**. `done_reason == "length"` on its own is not a failure —
+    a four-token budget holds `MCU` — and rejecting every truncated reply
+    would throw away good answers to avoid bad ones.
+  - `EUC` at temperature 0 with `done_reason == "stop"` is still
+    `REFUSAL_UNPARSEABLE`. The model answered; it will answer identically
+    forever; the retired row still goes.
+
+  The vision path had already learned this in 1.4.0 ("a 200 response with no
+  `response` field … is not a generate response at all"). `label_shots` had
+  not, which is the more useful half of the finding: **a lesson written into
+  the changelog had not crossed to the module three files away.**
+
+- **A keyframe whose file vanished mid-run took its label with it.** `missing`
+  is checked before the model is asked, so reaching the file reader at all is a
+  race — and that race landed in `refused`, which drops. Same asymmetry, third
+  face: only a verdict may retire a row.
+
+### Notes
+
+- `shot-size` gained an `inconclusive` count in its tally, reported separately
+  from `refused` and `unreachable` for the reason those two were split in the
+  first place: the operator needs to know **which run is worth repeating**, and
+  the three causes have three different answers.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05). The mutation
+  that removes this guard now fails six tests; before the fix it failed none.
+
 ## 1.4.0 — 2026-09-04
 
 ### Fixed

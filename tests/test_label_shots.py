@@ -7,6 +7,8 @@ import sqlite3
 import tempfile
 from unittest.mock import mock_open, patch
 
+import pytest
+
 from reel_scout import config, db, label_shots
 from reel_scout.shot_size import UNKNOWN
 from reel_scout.shots import Shot
@@ -442,6 +444,95 @@ def test_ollama_being_down_is_unreachable_not_a_refusal():
                _outcome(raise_=urllib.error.URLError("down"))):
         code, why = label_shots.classify_with_ollama("f.jpg", "m")
     assert code is None and why == label_shots.REFUSAL_UNREACHABLE
+
+
+# --- a 200 is not an answer (2026-09-05) ------------------------------------
+#
+# Every case below arrived as HTTP 200 and was read as text, so the caller
+# parsed a non-answer and reported REFUSAL_UNPARSEABLE -- "the model answered
+# and broke the vocabulary". That verdict is the one thing allowed to retire a
+# stored label. A model that said nothing was therefore emptying the table.
+# Measured 2026-09-05: qwen3-vl:8b, which wrote 2593 of this library's vision
+# descriptions, returns an empty string for BOTH questions.
+
+@pytest.mark.parametrize("payload, label", [
+    ({"error": "model requires more system memory"}, "error envelope"),
+    ({"response": ""}, "empty string (the qwen3-vl:8b case)"),
+    ({"response": "   \n"}, "whitespace only"),
+    ({"done_reason": "stop"}, "no response field at all"),
+    ({"response": "<think>\nThe user asks", "done_reason": "length"},
+     "budget spent on reasoning, no verdict"),
+])
+def test_a_200_without_an_answer_is_inconclusive_not_a_refusal(payload, label):
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"x")), \
+         patch("urllib.request.urlopen", _outcome(payload)):
+        code, why = label_shots.classify_with_ollama("f.jpg", "m")
+        answer, gate_why = label_shots.ask_subject_gate("f.jpg", "m")
+    assert (code, why) == (None, label_shots.REFUSAL_INCONCLUSIVE), label
+    assert (answer, gate_why) == (None, label_shots.REFUSAL_INCONCLUSIVE), label
+
+
+def test_an_answer_that_fits_inside_a_spent_budget_is_still_an_answer():
+    # The other side of the same line: `done_reason == "length"` is not itself
+    # a failure. A four-token budget holds `MCU`, and rejecting every truncated
+    # reply would throw away good answers to avoid the bad ones.
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"x")), \
+         patch("urllib.request.urlopen",
+               _outcome({"response": "MCU", "done_reason": "length"})):
+        code, why = label_shots.classify_with_ollama("f.jpg", "m")
+    assert (code, why) == ("MCU", None)
+
+
+def test_an_unparseable_answer_stays_a_refusal_when_nothing_was_truncated():
+    # The guard above must not swallow the real refusal it sits next to:
+    # `EUC` at temperature 0, done_reason "stop" -- the model answered, and
+    # will answer identically forever.
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"x")), \
+         patch("urllib.request.urlopen",
+               _outcome({"response": "EUC", "done_reason": "stop"})):
+        code, why = label_shots.classify_with_ollama("f.jpg", "m")
+    assert (code, why) == (None, label_shots.REFUSAL_UNPARSEABLE)
+
+
+def test_a_model_that_answers_nothing_never_removes_a_label():
+    # The failure this whole section exists for. Same shape as
+    # `test_an_outage_never_removes_a_label`, different cause -- and this one
+    # was live: the outage path was guarded, the silent-200 path was not.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "MCU", "vlm", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data=b"x")), \
+             patch("urllib.request.urlopen", _outcome({"response": ""})):
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
+        assert tally["inconclusive"] == 1
+        assert tally["refused"] == 0 and tally["dropped"] == 0
+        rows = db.get_shot_labels(conn, vid, kind="shot_size")
+        assert [(r["value"], r["prompt_hash"]) for r in rows] == [("MCU", "OLD")]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_frame_whose_file_vanishes_mid_run_keeps_its_label():
+    # `missing` is checked before the model is asked, so reaching the reader is
+    # a race -- and the race used to land in `refused`, which drops. Third face
+    # of the same asymmetry: only a verdict may retire a row.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "MCU", "vlm", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", side_effect=OSError("gone")):
+            tally = label_shots.label_video(conn, vid, "m", gate=False)
+        assert tally["missing"] == 1
+        assert tally["refused"] == 0 and tally["dropped"] == 0
+        assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 1
+    finally:
+        conn.close(); os.unlink(path)
 
 
 def test_an_outage_never_removes_a_label():
