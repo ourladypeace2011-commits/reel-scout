@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config
 from .utils.stderr import warn
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -720,6 +720,8 @@ def _migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
             dy          REAL,
             speed       REAL,
             agreement   REAL,
+            zoom        REAL,
+            rotation    REAL,
             frames      INTEGER NOT NULL,
             movement    TEXT NOT NULL,
             created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -750,6 +752,28 @@ def _migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
     if "prompt_hash" not in cols:
         conn.execute("ALTER TABLE shot_labels ADD COLUMN prompt_hash TEXT")
     conn.execute("UPDATE schema_version SET version = 17")
+    conn.commit()
+
+
+def _migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """Motion records scale and rotation, not just translation (v18 -> v19).
+
+    v18 stored `dx`/`dy` and a speed derived from them, which is the whole of
+    what a median motion vector can say. It cannot say *zoom*: the vector field
+    of a push-in is radial, and its median is (0, 0) — so a shot that ended 45%
+    tighter was stored as `speed 0.00, agreement 0.93` and read out as "the
+    camera is locked off". Confidently, and wrongly.
+
+    The two new columns are the fitted scale and rotation per shot. Existing
+    rows get NULL, which reads correctly as "measured before this was
+    recorded" — and, unlike a 0.0 default, does not claim the shot was checked
+    for zoom and found to have none.
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(shot_motion)")]
+    for name in ("zoom", "rotation"):
+        if name not in cols:
+            conn.execute("ALTER TABLE shot_motion ADD COLUMN %s REAL" % name)
+    conn.execute("UPDATE schema_version SET version = 19")
     conn.commit()
 
 
@@ -835,6 +859,9 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             current_ver = 17
         if current_ver < 18:
             _migrate_v17_to_v18(conn)
+            current_ver = 18
+        if current_ver < 19:
+            _migrate_v18_to_v19(conn)
     # Fresh installs never run the ladder, so every table added by a migration
     # also needs a CREATE IF NOT EXISTS here -- the same reason audio_events
     # below is repeated.
@@ -847,6 +874,8 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> sqlite3.Connection:
             dy          REAL,
             speed       REAL,
             agreement   REAL,
+            zoom        REAL,
+            rotation    REAL,
             frames      INTEGER NOT NULL,
             movement    TEXT NOT NULL,
             created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -1496,9 +1525,11 @@ def save_shot_motion(conn: sqlite3.Connection, video_id: str,
     for r in rows:
         conn.execute(
             "INSERT INTO shot_motion (video_id, t_sec, dx, dy, speed, "
-            "agreement, frames, movement) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "agreement, zoom, rotation, frames, movement) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (video_id, r["t_sec"], r["dx"], r["dy"], r["speed"],
-             r["agreement"], r["frames"], r["movement"]))
+             r["agreement"], r.get("zoom"), r.get("rotation"),
+             r["frames"], r["movement"]))
     conn.commit()
     return len(rows)
 

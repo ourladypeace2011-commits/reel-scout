@@ -939,6 +939,23 @@ def _cmd_motion(args) -> None:
         tally[r["movement"]] = tally.get(r["movement"], 0) + 1
     print("camera movement: " + ", ".join(
         "%d %s" % (tally[k], k) for k in sorted(tally, key=lambda x: -tally[x])))
+    transformed = [r for r in rows
+                   if r.get("zoom") is not None
+                   and (abs(r["zoom"]) >= motion.ZOOM_FLOOR
+                        or abs(r["rotation"]) >= motion.ROTATION_FLOOR)]
+    if transformed:
+        # Reported because until 2026-09-05 these were the shots this command
+        # called `static`: a radial or tangential field has a median of (0, 0),
+        # so a push-in measured "speed 0.00" and read out as a locked-off
+        # camera. The magnitudes are a floor, not a reading -- the encoder
+        # quantises a sub-pixel displacement to zero.
+        import math as _math
+        worst = max(transformed, key=lambda r: abs(r["zoom"]))
+        print("  %d shot(s) scale or rotate without travelling — the reading a "
+              "median motion vector cannot produce. Largest: %+.0f%% scale, "
+              "%+.1f deg over one shot"
+              % (len(transformed), worst["zoom"] * 100,
+                 _math.degrees(worst["rotation"])))
     if tally.get(motion.STILL_SUBJECT_MOVES):
         # Named rather than folded into "static": it is the state the first
         # attempt at this had no way to see, and the one it misread as camera
