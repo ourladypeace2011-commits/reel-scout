@@ -104,7 +104,12 @@ def get_transcriber(backend: Optional[str] = None) -> BaseTranscriber:
         from .faster_whisper import FasterWhisperTranscriber
         return FasterWhisperTranscriber(model=config.WHISPER_MODEL)
     elif backend == "whisper-cpp":
+        # Deliberately NOT config.WHISPER_MODEL: that is a faster-whisper model
+        # *name*, and whisper.cpp wants a ggml file *path*. Passing the name
+        # through was one of the three defects that kept this backend from ever
+        # running. The transcriber reads its own WHISPER_CPP_* settings and
+        # refuses to start with a precise message when they are missing.
         from .whisper_cpp import WhisperCppTranscriber
-        return WhisperCppTranscriber(model=config.WHISPER_MODEL)
+        return WhisperCppTranscriber()
     else:
         raise ValueError(f"Unknown whisper backend: {backend}")

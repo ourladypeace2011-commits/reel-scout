@@ -158,6 +158,18 @@ OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "")
 # --- Whisper ---
 WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "faster-whisper")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3")
+# `faster-whisper` is CPU-only on macOS: CTranslate2 ships no Metal backend, so
+# large-v3 runs at RTF ~1.22 there -- slower than realtime. Measured 2026-09-03
+# on an M2 Max: a 3:39:30 livestream took 4h28m. mlx-whisper on the same machine
+# is RTF 0.242 (large-v3) / 0.040 (large-v3-turbo). Nothing here fixes that; it
+# is recorded so the next person sizing a long job does not have to re-measure.
+#
+# whisper.cpp is the Metal path this package *could* use, and the settings below
+# are its own -- deliberately NOT WHISPER_MODEL, because whisper.cpp takes a
+# **path to a ggml file**, not a model name. Feeding it "large-v3" is one of the
+# three reasons that backend had never run. See transcribe/whisper_cpp.py.
+WHISPER_CPP_BIN = os.getenv("WHISPER_CPP_BIN", "")      # "" -> auto-detect
+WHISPER_CPP_MODEL = os.getenv("WHISPER_CPP_MODEL", "")  # path to ggml-*.bin
 # Language handling. Defaults reproduce prior behavior (detect-once, transcribe).
 #   WHISPER_LANGUAGE=""      -> auto-detect (whisper locks one language from the opening window)
 #   WHISPER_LANGUAGE="en"    -> force a single language
