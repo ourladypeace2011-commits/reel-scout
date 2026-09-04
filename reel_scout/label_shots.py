@@ -140,9 +140,13 @@ def analysable(conn, video_id: str) -> Tuple[int, int]:
     is "the files are missing". Those are different problems with different
     remedies, and `db health` already counts the second one.
     """
+    # DISTINCT t_sec, not COUNT(*): the unit is the frame, which is what the
+    # caller prints ("%d/%d frame(s)"). A frame holding rows from two sources
+    # was counted as two frames, so a library with a gate pass reported a
+    # denominator twice its own size.
     row = conn.execute(
-        "SELECT COUNT(*) AS total, "
-        "SUM(CASE WHEN value != ? THEN 1 ELSE 0 END) AS scaled "
+        "SELECT COUNT(DISTINCT t_sec) AS total, "
+        "COUNT(DISTINCT CASE WHEN value != ? THEN t_sec END) AS scaled "
         "FROM shot_labels WHERE video_id = ? AND kind = 'shot_size' "
         "AND source != 'supplied'", (UNKNOWN, video_id)).fetchone()
     return int(row["scaled"] or 0), int(row["total"] or 0)
@@ -210,6 +214,15 @@ REFUSAL_INCONCLUSIVE = "inconclusive"
 # leaves what is already there alone.
 INCONCLUSIVE_REFUSALS = (REFUSAL_UNREACHABLE, REFUSAL_UNREADABLE,
                          REFUSAL_INCONCLUSIVE)
+
+# The gate and the classifier are two questions in one asking, not two
+# opinions: whichever one produces the verdict, the frame ends the run holding
+# exactly one. Stored side by side they never converge -- the frame keeps a row
+# from a retired prompt forever, `analysable` counts it twice, and the
+# inspector shows whichever sorts first. `supplied` is deliberately not in
+# here: a person's correction is a different kind of claim and does sit beside
+# the model's.
+MODEL_SOURCES = (SOURCE_VLM, SOURCE_GATE)
 
 # Each lands in the bucket that already means that thing, so the tally keeps
 # naming causes rather than growing a bucket per code path.
@@ -320,8 +333,8 @@ def label_video(conn, video_id: str, model: str,
     # library keeps paying for, and it took one run to build a fresh one.
     tally: Dict[str, Any] = {"labelled": 0, "unknown": 0, "refused": 0,
                              "unreachable": 0, "inconclusive": 0, "dropped": 0,
-                             "gated": 0, "skipped": 0, "missing": 0,
-                             "skipped_format": None}
+                             "collapsed": 0, "gated": 0, "skipped": 0,
+                             "missing": 0, "skipped_format": None}
     if not force:
         fmt = skip_reason(conn, video_id)
         if fmt:
@@ -385,12 +398,15 @@ def label_video(conn, video_id: str, model: str,
                 continue
         # The label hangs off the frame's timestamp, not the shot id: spans are
         # replaced on every re-analyze, timestamps are not.
-        db.save_shot_label(conn, video_id, frame["timestamp_sec"],
-                           "shot_size", code, source, used_model,
-                           # Supplied labels did not come from our prompt, so
-                           # they carry no fingerprint — stamping one would
-                           # claim a provenance they do not have.
-                           prompt_fingerprint()
-                           if source in (SOURCE_VLM, SOURCE_GATE) else None)
+        tally["collapsed"] += db.save_shot_label(
+            conn, video_id, frame["timestamp_sec"],
+            "shot_size", code, source, used_model,
+            # Supplied labels did not come from our prompt, so they carry no
+            # fingerprint — stamping one would claim a provenance they do not
+            # have.
+            prompt_fingerprint() if source in MODEL_SOURCES else None,
+            # A model row replaces the other model source at this frame; a
+            # supplied one replaces neither.
+            supersedes=MODEL_SOURCES if source in MODEL_SOURCES else ())
         tally["unknown" if code == UNKNOWN else "labelled"] += 1
     return tally

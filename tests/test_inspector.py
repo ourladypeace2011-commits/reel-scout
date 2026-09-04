@@ -595,3 +595,18 @@ def test_a_hand_supplied_size_outranks_the_model_on_the_page():
         assert g["rows"][0]["size"] == "CU"
     finally:
         conn.close(); os.unlink(path)
+
+
+def test_a_hand_supplied_size_outranks_a_gated_unknown_too():
+    # The test above passes on the alphabet, not on the rule: 'supplied' sorts
+    # before 'vlm', so it lands first and the model row never overwrites it --
+    # with or without the precedence clause. 'gate' sorts before 'supplied',
+    # which is the case that actually asks the question, and the one a gate
+    # pass makes ordinary: a frame the gate rejected, then corrected by hand.
+    conn, path = _grammar_db()
+    try:
+        db.save_shot_label(conn, "v1", 2.4, "shot_size", "UNKNOWN", "gate", "m")
+        db.save_shot_label(conn, "v1", 2.4, "shot_size", "CU", "supplied", None)
+        assert inspector._shot_grammar(conn, "v1")["rows"][0]["size"] == "CU"
+    finally:
+        conn.close(); os.unlink(path)

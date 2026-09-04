@@ -891,6 +891,15 @@ def _cmd_shot_size(args) -> None:
               "prompt — qwen3-vl:8b returns an empty string for both questions "
               "here — or raise the token budget" % tally["inconclusive"],
               file=sys.stderr)
+    if tally["collapsed"]:
+        # Only ever non-zero on the first run after the gate and the classifier
+        # stopped storing side by side. Reported because a silent DELETE is
+        # indistinguishable from data that was never there.
+        print("  collapsed = %d frame(s) were holding a second row from the "
+              "other half of the same asking (gate vs classifier). One frame "
+              "gets one model verdict, so the stale half was replaced rather "
+              "than left to be counted twice" % tally["collapsed"],
+              file=sys.stderr)
     if tally["dropped"]:
         print("  dropped = %d label(s) from a retired prompt sat on frames this "
               "prompt cannot answer, so they were removed rather than left "

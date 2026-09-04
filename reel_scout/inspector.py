@@ -97,11 +97,19 @@ def _shot_grammar(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
     Reads what is stored; measures nothing. A clip that has been through
     neither `shot-size` nor `motion` renders no block rather than an empty one.
     """
-    sizes = {}
+    # Precedence is stated here, not read off the sort order. `supplied` is a
+    # person's own call and outranks the model's -- but that used to hold only
+    # because 'supplied' sorted after 'vlm'. It does not sort after 'gate', so
+    # the moment a gated UNKNOWN and a human correction shared a frame, the
+    # UNKNOWN would have covered the correction. The old test passed on the
+    # alphabet, not on the rule.
+    sizes: Dict[float, Any] = {}
+    ranked: Dict[float, int] = {}
     for row in db.get_shot_labels(conn, video_id, kind="shot_size"):
-        # `supplied` is a person's own call and outranks the model's.
-        if row["t_sec"] not in sizes or row["source"] == "supplied":
+        rank = 2 if row["source"] == "supplied" else 1
+        if rank >= ranked.get(row["t_sec"], 0):
             sizes[row["t_sec"]] = row["value"]
+            ranked[row["t_sec"]] = rank
     motions = {r["t_sec"]: r for r in db.get_shot_motion(conn, video_id)}
     shots = conn.execute(
         "SELECT idx, start_sec, end_sec FROM shots WHERE video_id = ? "

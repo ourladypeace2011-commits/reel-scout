@@ -517,6 +517,113 @@ def test_a_model_that_answers_nothing_never_removes_a_label():
         conn.close(); os.unlink(path)
 
 
+# --- one frame, one model verdict (2026-09-05) -------------------------------
+#
+# The gate and the classifier are two questions in one asking, but they stored
+# under different `source` values -- and the unique key includes `source`, so
+# neither replaced the other. A frame answered by the gate on one run and the
+# classifier on the next ended up holding both. Consequences, all measured:
+# the clip never leaves `stale_videos` (one row always carries the retired
+# prompt), `analysable` counts one frame as two, and the inspector shows
+# whichever source sorts first -- 'gate' does.
+
+def _labelled(conn, vid):
+    return [(r["t_sec"], r["source"], r["value"], r["prompt_hash"])
+            for r in db.get_shot_labels(conn, vid, kind="shot_size")]
+
+
+def test_a_gated_frame_does_not_keep_the_classifier_row_beside_it():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "MCU", "vlm", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate",
+                          return_value=(False, None)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["gated"] == 1 and tally["collapsed"] == 1
+        assert _labelled(conn, vid) == [
+            (2.0, "gate", UNKNOWN, label_shots.prompt_fingerprint())]
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_classified_frame_does_not_keep_the_gate_row_beside_it():
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", UNKNOWN, "gate", "m", "OLD")
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate",
+                          return_value=(True, None)), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=("CU", None)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["labelled"] == 1 and tally["collapsed"] == 1
+        assert _labelled(conn, vid) == [
+            (2.0, "vlm", "CU", label_shots.prompt_fingerprint())]
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_analysable_counts_frames_not_rows():
+    # The unit the caller prints is "%d/%d frame(s)". A frame holding a row
+    # from each source was two frames to this query, so a library with a gate
+    # pass reported a denominator twice its own size.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", UNKNOWN, "gate", "m", "H")
+        db.save_shot_label(conn, vid, 2.0, "shot_size", UNKNOWN, "vlm", "m", "H")
+        db.save_shot_label(conn, vid, 5.0, "shot_size", "CU", "vlm", "m", "H")
+        assert label_shots.analysable(conn, vid) == (1, 2)
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_persons_correction_still_sits_beside_the_models_answer():
+    # The other half of the rule, and the reason it is not "one row per frame":
+    # a human call and a model guess are different kinds of claim. Only the two
+    # halves of one asking collapse into each other.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "supplied", None)
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate",
+                          return_value=(True, None)), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=("MS", None)):
+            tally = label_shots.label_video(conn, vid, "m")
+        assert tally["collapsed"] == 0
+        assert sorted(r[1] for r in _labelled(conn, vid)) == ["supplied", "vlm"]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_re_run_after_a_prompt_change_converges():
+    # What PR #105 claimed and did not deliver across sources: run twice, and
+    # the second run must find nothing left to do.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0), (12, 5.0)))
+        for t in (2.0, 5.0):
+            db.save_shot_label(conn, vid, t, "shot_size", "MCU", "vlm", "m", "OLD")
+        assert label_shots.stale_videos(conn) == [vid]
+        with patch("os.path.exists", return_value=True), \
+             patch.object(label_shots, "ask_subject_gate",
+                          side_effect=[(False, None), (True, None)]), \
+             patch.object(label_shots, "classify_with_ollama",
+                          return_value=("LS", None)):
+            label_shots.label_video(conn, vid, "m")
+        assert label_shots.stale_videos(conn) == []
+        assert label_shots.analysable(conn, vid) == (1, 2)
+    finally:
+        conn.close(); os.unlink(path)
+
+
 def test_a_frame_whose_file_vanishes_mid_run_keeps_its_label():
     # `missing` is checked before the model is asked, so reaching the reader is
     # a race -- and the race used to land in `refused`, which drops. Third face
