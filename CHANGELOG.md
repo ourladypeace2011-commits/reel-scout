@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-09-04
 
 ### Fixed
 
@@ -279,6 +279,48 @@
   everything the pipeline produced remains read-only over HTTP.
 ### Added
 
+- **Shot sizes, and a column that remembers which prompt produced them**
+  (`shot-size`, schema v15/v17). Seven codes sourced from
+  `prompts/storyboard-visualize.md`, one label per shot's representative frame.
+  The prompt's fingerprint is stored beside each label because a prompt change
+  moved the answer ten-to-one on the same images: listing the codes with their
+  English names returned `ECU` ten times where defining each code by
+  subject-to-frame ratio returned it once. `db health` reports labels made by a
+  superseded prompt and names the command that refreshes them.
+- **A gate that asks whether the question applies before asking it.** A binary
+  "is this a single photographic shot with a person as its subject" pass runs
+  first; frames it rejects are stored as `UNKNOWN` rather than given a code.
+  Measured on 12 hand-judged frames: 2/12 correct without the gate, 10/12 with
+  it. It rejects roughly 70% of this corpus, and it adds ~13% to the pass rather
+  than doubling it, because everything rejected skips the classifier.
+  `--no-gate` restores the old behaviour.
+- **`analysable`, reported next to the codes and never without them.** Of 94
+  labelled clips, 40 have no frame the vocabulary applies to — they are screen
+  recordings, title cards and composite layouts. Showing codes alone would
+  present those forty as confidently as the two that scored 100%.
+- **Camera movement per shot, read from the codec's own motion vectors**
+  (`motion`, schema v18, new `[motion]` extra). Four states from two numbers —
+  median block motion and the share of blocks that agree with it: the camera is
+  locked off, the camera holds while something inside the frame moves, the
+  camera moves coherently, or the motion is incoherent (handheld, compositing).
+  Across 3,468 shots: 53% static, 8% unsteady, 7% still-with-subject-motion,
+  2.5% coherent camera moves, the rest too short to say.
+  Direction is stored but deliberately not named: across 585 hand-scanned shots
+  only seven were coherent moves, and seven is not enough to earn a vocabulary.
+- **A Chinese mirror for free text** (`translate`, schema v16), and the
+  inspector renders both languages side by side. Translations record the hash of
+  the source they were made from, so an edited source shows as stale rather than
+  silently keeping an old translation.
+- **`db health`** — one command that says what is measurable, what is missing,
+  and which command closes each gap. Counts, never percentages; "cannot" is
+  separated from "not yet"; `--strict` fails only on gaps something on this
+  machine can actually close.
+- **`db backfill-shots`** for clips analysed before the `shots` table existed,
+  and **`export --format storyboard`** with `storyboard-diff` for the return
+  trip.
+- **A shot-grammar block in the web inspector** — per-shot size and movement
+  with the numbers the movement class came from, plus the analysable ratio.
+
 - **Keyframe extraction is a run with an identity, so re-sampling is possible
   without destroying the evidence it replaces.** Frames used to be tied to the
   clip alone, which made "extract again with different settings" either
@@ -362,6 +404,33 @@
   are enforced once instead of three times, slightly differently.
 
 ### Changed
+
+- **`classify_with_ollama` returns `(code, refusal)` instead of bare `None`.**
+  One value used to cover four causes — an unreadable image, ollama being
+  unreachable, malformed JSON, and a model answering outside the vocabulary —
+  and the caller counted all four as "refused". Only the last is deterministic;
+  an outage is emphatically worth retrying. The split is what makes it safe to
+  act on a refusal at all.
+- **Schema v13 → v18**, applied by the existing migration ladder: `shots` (v14),
+  `shot_labels` (v15), `translations` (v16), `shot_labels.prompt_hash` (v17),
+  `shot_motion` (v18). Every one is additive.
+
+### Known limits
+
+- 🔴 **Shot sizes are a signal, not ground truth, and the ceiling is not the
+  model.** Same 12 frames, same prompt: `qwen2.5vl:7b` 2/12, `gemma3:27b` 1/12,
+  GPT-5.5 2/12 — three tiers, the same score, wrong on the same frames. A third
+  of this corpus has no person in it at all, and the seven codes are defined by
+  where a human body is cut, so those frames have no correct answer to pick.
+  Spelling the exceptions out inside the seven-way prompt made it *worse*
+  (2/12 → 0/12) and three times slower; the same rules as a binary question
+  score 10/12. The published literature puts subject-centric models at ~88% on
+  curated film material and motion-vector methods at ~52%, which is why movement
+  reads from motion vectors and scale does not.
+- ⚠️ Movement tolerates the codec's frame-type rhythm rather than correcting for
+  it: adjacent frames of one shot measured 2% and 55% moving blocks, and a
+  median over a strictly alternating series is its mean. The thresholds were set
+  on data carrying the same rhythm.
 
 - **`show_video` no longer hands an agent a whole transcript timeline it did not
   ask for.** Measured across the 101-video library with the same serializer both
