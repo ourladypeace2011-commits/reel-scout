@@ -4,6 +4,47 @@
 
 ### Fixed
 
+- **The gate and the classifier stored side by side, so a re-run never
+  converged.** They are two questions in one asking, but they wrote under
+  different `source` values — and `source` is part of the unique key, so
+  neither replaced the other. A frame answered by the gate on one run and the
+  classifier on the next ended up holding both rows. Three consequences, each
+  reproduced:
+
+  - the clip never left `stale_videos`, because one of its two rows always
+    carried the retired prompt. **This is precisely what #105 ("make a re-run
+    converge") claimed to fix**; it converges within a source and never
+    noticed the case across two.
+  - `analysable` counted one frame as two — and the caller prints that number
+    as `%d/%d frame(s)`, so a library with a gate pass reported a denominator
+    twice its own size.
+  - the inspector showed whichever source sorted first, and `gate` sorts
+    before `vlm`: a stale UNKNOWN covered a fresh CU.
+
+  A model row now replaces the other model source at the same frame: one
+  frame, one model verdict. `supplied` is deliberately **not** part of that —
+  a person's correction and a model's guess are different kinds of claim and
+  still sit side by side. Only the two halves of one asking collapse into each
+  other.
+
+- **A hand-supplied size outranked the model by alphabetical accident.** The
+  rule was in the code (`or row["source"] == "supplied"`) and the test passed
+  without it: `'supplied'` sorts before `'vlm'`, so it landed first and the
+  model row never overwrote it either way. `'gate'` does not sort before
+  `'supplied'` — so the first time a gated UNKNOWN and a human correction
+  shared a frame, the UNKNOWN would have won. Precedence is now stated rather
+  than read off the sort order, and the test that pins it uses a `gate` row,
+  which is the only arrangement that asks the question.
+
+### Notes
+
+- `shot-size` reports a `collapsed` count, non-zero only on the first run
+  after this change: a silent DELETE is indistinguishable from data that was
+  never there. One `shot-size <video>` run cleans that clip's duplicates,
+  since every frame it visits is rewritten.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05), B2 and
+  mutation M42.
+
 - **A model that answered nothing was deleting labels.** `shot-size` read every
   HTTP 200 from ollama as text. ollama returns 200 carrying its own `error`
   envelope, 200 with an empty string, and 200 with nothing but reasoning the

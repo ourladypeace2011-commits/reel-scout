@@ -1513,13 +1513,32 @@ def get_shot_motion(conn: sqlite3.Connection, video_id: str) -> list:
 def save_shot_label(conn: sqlite3.Connection, video_id: str, t_sec: float,
                     kind: str, value: Optional[str], source: str,
                     model: Optional[str] = None,
-                    prompt_hash: Optional[str] = None) -> None:
+                    prompt_hash: Optional[str] = None,
+                    supersedes: Tuple[str, ...] = ()) -> int:
     """Upsert one label. Keyed by (video, kind, timestamp, source) so a VLM pass
     and a human correction sit side by side instead of clobbering each other.
 
+    `supersedes` names sources this write *replaces* rather than sits beside,
+    and returns how many rows that removed. Side-by-side is the right default
+    for a person's correction and a model's guess -- they are different kinds
+    of claim. It is the wrong default for two answers from the same asking:
+    one frame gets one verdict per producer, and a producer that answers a
+    frame a second way has changed its mind, not added a second opinion.
+    Caller supplies the sources because which ones are one producer is
+    vocabulary, and vocabulary does not live in here.
+
     `prompt_hash` travels with the value because the prompt moves the answer as
     much as the model does — measured, ten-to-one on the same images."""
+    removed = 0
     with conn:
+        others = tuple(x for x in supersedes if x != source)
+        if others:
+            cur = conn.execute(
+                "DELETE FROM shot_labels WHERE video_id = ? AND kind = ? "
+                "AND t_sec = ? AND source IN (%s)"
+                % ",".join("?" * len(others)),
+                (video_id, kind, float(t_sec)) + others)
+            removed = cur.rowcount or 0
         conn.execute(
             "INSERT INTO shot_labels (video_id, t_sec, kind, value, source, model, "
             "prompt_hash) VALUES (?,?,?,?,?,?,?) "
@@ -1528,13 +1547,19 @@ def save_shot_label(conn: sqlite3.Connection, video_id: str, t_sec: float,
             "prompt_hash = excluded.prompt_hash, created_at = datetime('now')",
             (video_id, float(t_sec), kind, value, source, model, prompt_hash),
         )
+    return removed
 
 
 def get_shot_labels(conn: sqlite3.Connection, video_id: str,
                     kind: Optional[str] = None) -> List[sqlite3.Row]:
     """Labels for a clip, in time order. Every row carries its own source and
     model — a caller choosing between two labels for the same moment has to be
-    able to see which produced which."""
+    able to see which produced which.
+
+    The `source` in the ORDER BY is a tie-break for stable output, **not** a
+    precedence. A caller that wants the person's call to win has to say so;
+    reading it off the alphabet worked only as long as the sources happened to
+    sort the right way, and `gate` sorts before `supplied`."""
     sql = "SELECT * FROM shot_labels WHERE video_id = ?"
     params: List[Any] = [video_id]
     if kind:
