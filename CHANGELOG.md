@@ -4,6 +4,38 @@
 
 ### Fixed
 
+- **`scores.model_used` recorded the backend, not the model — while `stats`
+  grouped on it under a docstring promising the opposite.** All 115 locally
+  scored rows in the library read `ollama`. The docstring on the aggregate
+  says grouping is "on the exact `model_used` string, the finest grain that is
+  actually correct: two local VLMs are no more comparable to each other than an
+  agent is to either" — and every model that ever scored under one backend was
+  pooled into a single yardstick, which is precisely what the column was added
+  to prevent. Swapping `qwen2.5:14b` for `gpt-oss:20b` moved nothing on the
+  page.
+
+  The gap was only in the scorer: the ingest path already stamps
+  `agent:<model>`, and `vision_descriptions.vlm_model`,
+  `translations.engine`/`model` and `shot_labels.model` were all checked and
+  are correct. New scores carry `<backend>:<model>` — the same shape, so a
+  reader splits on the first colon whoever produced the row.
+
+  ⚠️ **The 115 existing rows are left as they are.** A bare backend name is a
+  readable "recorded before the model was"; backfilling it would mean inventing
+  a fact that is not written down anywhere, and a wrong provenance is worse
+  than a missing one.
+
+### Notes
+
+- The audit also flagged 1,077 `ocr_captions` rows with `engine='vlm'` and no
+  model. Checked: those rows are re-read from `vision_descriptions.text_in_frame`
+  at the same keyframe, and that table **does** record `vlm_model` — so the
+  provenance is recoverable by join rather than lost. No column added; a second
+  copy of a fact is a second thing that can drift from it.
+- `BaseLLM` gained a `model` property, so a backend added later cannot quietly
+  go back to recording only itself.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05): R7.
+
 - **"This codec has no motion vectors" was reported as "this shot was too
   short".** FFmpeg exports motion vectors for H.264; HEVC, VP9 and AV1 give
   none, and an all-intra file has none to give. All three decoded fine, yielded

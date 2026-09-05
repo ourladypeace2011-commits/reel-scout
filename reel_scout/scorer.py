@@ -88,6 +88,24 @@ class VideoScore:
     model_used: str = ""
 
 
+def _provenance(llm, backend: str) -> str:
+    """`<backend>:<model>`, or the bare backend when the model is unknown.
+
+    Same shape as `ingest.provenance` (`agent:<model>`), so every producer in
+    the library stamps its origin the same way and a reader can split on the
+    first colon.
+
+    ⚠️ **Rows written before 2026-09-05 carry a bare backend name.** That is
+    not a bug in them, it is what was recorded -- but it means `ollama` alone
+    and `ollama:qwen2.5:14b` are not the same claim, and a bare one cannot be
+    compared to anything at model grain. It is left as it is rather than
+    backfilled with a guess: which model scored those 115 rows is not written
+    down anywhere, and inventing it would be worse than the gap.
+    """
+    model = (getattr(llm, "model", "") or "").strip()
+    return "%s:%s" % (backend, model) if model else backend
+
+
 def score_video(
     conn: db.sqlite3.Connection,
     video_id: str,
@@ -149,7 +167,7 @@ def score_video(
         structure=structure,
         overall=overall,
         reasoning=str(data.get("reasoning", "")),
-        model_used=llm_backend or config.LLM_BACKEND,
+        model_used=_provenance(llm, llm_backend or config.LLM_BACKEND),
     )
 
     # Save to DB
