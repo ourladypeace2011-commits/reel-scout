@@ -4,6 +4,48 @@
 
 ### Fixed
 
+- **The docs advertised an MCP tool that has never existed.** `README.md` and
+  `README.zh.md` listed `get_transcript` among the read-side tools;
+  `git log -S` returns nothing for it, in any version, since the MCP server was
+  written. It had been there for six weeks.
+
+  It was not alone. `docs/commands.md` said **8 tools against 19**, six `db`
+  subcommands against eight, four export formats against six, and omitted five
+  whole CLI commands. `docs/roadmap.md` gave the version as v1.3.1 while the
+  code read 1.4.0, and stated the schema as **v18 on one line and v17 on the
+  next — directly above a warning it had written itself about making exactly
+  that mistake in the version before.** `SKILL.md`, which **ships inside the
+  wheel** under the heading "do **not** invent flags beyond these", was missing
+  `--force-keyframes`: a list that omits a real flag is worse than no list,
+  because it makes the real one look invented.
+
+  All corrected — and, more usefully, `tests/test_docs_are_current.py` now
+  derives every one of those claims from the code and fails on a mismatch.
+  Prose does not rot faster than code; it rots at the same rate and nobody
+  notices, because there is no failing test to notice with. Verified by putting
+  each of the six errors back: every one turns the gate red.
+
+- **Six merged changes reached 1.4.0 with no changelog entry** — `mark` and
+  its `clip_marks` table (**a whole schema step**, v13), URL-based clip
+  identity, Apple-playable codec selection, transcripts outliving their media,
+  near-miss BPM reporting, and evidence coverage in `stats`. Written into the
+  1.4.0 section now, marked with the date they were recorded rather than
+  backdated.
+
+### Notes
+
+- The 1.4.0 note "Schema v13 → v18" describes the repo's history, not an
+  upgrade: **1.3.1 on PyPI shipped `SCHEMA_VERSION = 10`**, so a published-
+  version upgrade runs v10 → v18. Both were tested on real backups; the line
+  now says which is which.
+- The gate is deliberately narrow: only claims **enumerable from the code** are
+  checked. Prose about intent, tradeoffs and history is not, and must not be —
+  a gate demanding exact wording would be reformatted into uselessness within
+  a month. Its first two versions were too broad and flagged the roadmap's
+  *correct* quotations of its own past errors; the fix was to give the current
+  claim one authoritative line and leave the commentary around it free.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05): R8, R9.
+
 - **`scores.model_used` recorded the backend, not the model — while `stats`
   grouped on it under a docstring promising the opposite.** All 115 locally
   scored rows in the library read `ollama`. The docstring on the aggregate
@@ -291,6 +333,32 @@
   fixes the same mutations turned nothing red at all.
 
 ## 1.4.0 — 2026-09-04
+
+
+### Added in 1.4.0, recorded 2026-09-05
+
+Six merged changes reached 1.4.0 with no entry. Found by an independent audit
+(R9) and confirmed against `git log --first-parent v1.3.1..v1.4.0`, 60 merges.
+Written now rather than left out: a changelog with holes is worse than a short
+one, because a reader cannot tell which it is.
+
+- **`mark` — moments on a clip's timeline, shown alongside it in the
+  inspector** (#70). Added `clip_marks`, **schema v13**. The one whose absence
+  mattered most: it introduced a table, and a schema step with no changelog
+  entry is a step nobody knows to look for.
+- **A clip is identified by its URL, not by matching strings** (#71).
+- **Downloads pick a codec Apple devices can play** (#78, #79). Excluding AV1
+  was not enough — the whole library was unplayable on an iPad. Instagram and
+  TikTok had **no codec condition at all**, and 88 of 103 bad files came from
+  there.
+- **A transcript outlives its media** (#80), so deleting a video no longer
+  silently takes the text with it.
+- **A near-miss BPM is reported instead of vanishing** (#84). The two states it
+  could not tell apart were "flattened" and "no rhythm at all" — which are
+  opposite readings of the same clip.
+- **`stats` reports evidence coverage** (#85, #87), so a newly landed
+  extraction layer is measured in the same round it ships: shots coverage was
+  3 of 116 when it was first looked at.
 
 ### Fixed
 
@@ -704,6 +772,12 @@
 - **Schema v13 → v18**, applied by the existing migration ladder: `shots` (v14),
   `shot_labels` (v15), `translations` (v16), `shot_labels.prompt_hash` (v17),
   `shot_motion` (v18). Every one is additive.
+
+  ⚠️ **v13 is where `master` was, not where a PyPI user is.** The previous
+  release on PyPI, 1.3.1, shipped `SCHEMA_VERSION = 10`, so an upgrade from
+  the published version runs **v10 → v18**. Both paths were tested on real
+  backups, but the range in this line describes the repo's history rather
+  than anyone's upgrade.
 
 ### Known limits
 

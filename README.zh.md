@@ -172,7 +172,7 @@ reel-scout mcp path       # 看註冊在哪
 reel-scout-mcp            # 或直接跑（stdio transport）
 ```
 
-工具涵蓋兩側：**讀** —— `list_videos`、`show_video`、`get_transcript`、以及 `keyframes`（讓沒有檔案系統的 agent 也看得到抽好的關鍵幀）；**寫** —— `ingest`（vision／score／analysis）、背景 `batch`、`inspect`。這就是 **L1** 的運作方式：一個看得到圖的 agent 自己補上視覺層與工藝評分，結果落進 `show` / `view` / `inspect` / `export` 而不是聊天記錄。
+工具涵蓋兩側：**讀** —— `list_videos`、`show_video`、`patterns`、`inspire`、`research`、以及 `keyframes`（讓沒有檔案系統的 agent 也看得到抽好的關鍵幀）；**寫** —— `ingest_vision`／`ingest_score`／`ingest_analysis`、`mark`、`annotate`、背景 `batch_start`／`batch_status`／`batch_cancel`、`inspect`。這就是 **L1** 的運作方式：一個看得到圖的 agent 自己補上視覺層與工藝評分，結果落進 `show` / `view` / `inspect` / `export` 而不是聊天記錄。
 
 ---
 

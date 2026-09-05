@@ -13,7 +13,7 @@ see [`../prompts/signal-reliability-cheatsheet.md`](../prompts/signal-reliabilit
 | `analyze <url\|path…>` | Full pipeline: download/register → transcribe → keyframes+VLM → shot/audio metrics (§4E) → on-screen text (§4F) → merge → optional score. Accepts a local file path (platform-outage insurance). `--score`. |
 | `transcribe <path>` / `vision <path>` | Individual stages against a local file. |
 | `list` / `show <id>` | List analyzed videos / show one analysis. |
-| `export --format json\|csv\|html\|bundle` | Export analyses. `html` = one self-contained file; **`bundle`** = one self-contained file *per reel* + an index (the course take-home). |
+| `export --format json\|csv\|html\|bundle\|skeleton\|storyboard` | Export analyses. `html` = one self-contained file; **`bundle`** = one self-contained file *per reel* + an index (the course take-home). |
 | `view` | Local web server for the library: a table with star / group / note per row. The analysis stays read-only; only your own annotations write back. |
 | `note <ref>` | Annotate a clip. `--text`, `--group <name>` (`--new-group`), `--no-group`, `--star` / `--unstar`, `--json`. |
 | `group {list,add,rename,rm}` | Manage the annotation groups (also doable from the list page toolbar). `rm` clears the filing and keeps every note and star. |
@@ -29,14 +29,16 @@ see [`../prompts/signal-reliability-cheatsheet.md`](../prompts/signal-reliabilit
 | `batch --stdin` / `--file <path>` / `--doc <url>` | Analyze every reel in a list, one bundle each. `--dry-run`, `--limit`, `--out`, `--mode`. Prefer `--stdin`/`--file` for someone's own list — it stays on their machine. `--doc` rewrites Google `/edit` links to no-auth export endpoints, which needs sharing set to "anyone with the link", i.e. it makes that document public to anyone holding the URL. |
 | `skill {install,path}` | Copy the agent-facing assets (SKILL.md, `/scout`, prompt pack, setup preflight) to `~/.claude/skills/reel-scout`. `--dest`, `--force`. `pip install` alone does **not** give an agent anything to load. |
 | `mcp install` / `mcp path` | Register the MCP server with Claude Desktop / Claude Code so they can launch it, pinning an absolute `REEL_SCOUT_DATA`. `--client`, `--data`, `--path`, `--force`, `--dry-run`. `mcp path` diagnoses what is configured versus what this directory resolves to. |
-| `db {stats,reset,migrate,normalize-paths,backfill-text,check-invalid}` / `config {show,check}` | DB / config utilities. `check-invalid` lists videos whose media never really processed (0 keyframes alongside a non-empty transcript) and would otherwise average into `stats` as a genuine 0.0; it reports by default and marks `status=invalid` only with `--apply`. It never deletes. |
+| `db {stats,reset,migrate,normalize-paths,backfill-text,health,backfill-shots,check-invalid}` / `config {show,check}` | DB / config utilities. `check-invalid` lists videos whose media never really processed (0 keyframes alongside a non-empty transcript) and would otherwise average into `stats` as a genuine 0.0; it reports by default and marks `status=invalid` only with `--apply`. It never deletes. |
 
 Refs (`<ref>`, `<id>`) accept a full 16-hex video id or a unique prefix; `track --my-video` also accepts a URL already in the DB.
 
 ## MCP tools (`reel-scout-mcp`, stdio)
 
-8 tools: `crawl`, `analyze`, `list_videos`, `show_video`, `export`, `patterns`,
-`inspire`, `research`. LLM/network tools (`analyze`, `inspire`, `research`) route
+19 tools: `analyze`, `annotate`, `batch_cancel`, `batch_start`, `batch_status`,
+`crawl`, `export`, `ingest_analysis`, `ingest_score`, `ingest_vision`, `inspect`,
+`inspire`, `keyframes`, `list_annotations`, `list_videos`, `mark`, `patterns`,
+`research`, `show_video`. LLM/network tools (`analyze`, `inspire`, `research`) route
 stdout to stderr so they don't corrupt the JSON-RPC stream. `research` reads the
 existing DB by default; pass `analyze: true` to crawl+analyze first (slow).
 
