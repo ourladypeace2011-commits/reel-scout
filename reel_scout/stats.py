@@ -93,6 +93,14 @@ def _score_groups(
     is actually correct: two local VLMs are no more comparable to each other than
     an agent is to either. A coarser agent-vs-local split is derivable from the
     `agent:` prefix; the reverse is not, so the fine grain is what gets stored.
+
+    ⚠️ **That was true of the ingest path and false of the scorer until
+    2026-09-05.** `scorer` wrote the *backend*, so 115 of 115 locally-scored
+    rows read `ollama` and every model that ever scored under it was pooled
+    into one yardstick — the exact thing this grouping exists to prevent, hidden
+    behind a docstring that said otherwise. New rows carry `<backend>:<model>`;
+    a bare backend name means the row predates that and cannot be compared at
+    model grain.
     """
     selects = [
         # NULL and '' both mean "origin never recorded" and belong in one
