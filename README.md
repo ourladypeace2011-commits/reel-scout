@@ -165,10 +165,11 @@ reel-scout mcp path       # show where it's registered
 reel-scout-mcp            # or run it directly (stdio transport)
 ```
 
-Tools cover both sides: **read** — `list_videos`, `show_video`, `get_transcript`,
-and a `keyframes` tool so an agent with no filesystem can still see the extracted
-frames; **write** — `ingest` (vision / score / analysis), a background `batch`, and
-`inspect`. This is how the **L1** tier works: an agent that can see images supplies
+Tools cover both sides: **read** — `list_videos`, `show_video`, `patterns`,
+`inspire`, `research`, and a `keyframes` tool so an agent with no filesystem can
+still see the extracted frames; **write** — `ingest_vision` / `ingest_score` /
+`ingest_analysis`, `mark` and `annotate`, a background `batch_start` /
+`batch_status` / `batch_cancel`, and `inspect`. This is how the **L1** tier works: an agent that can see images supplies
 the visual layer and craft score itself, so results land in `show` / `view` /
 `inspect` / `export` instead of a chat log.
 

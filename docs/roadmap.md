@@ -53,11 +53,13 @@ Phase 6  ████████████████████  ✅ Shot-
 Phase 7  ████████████████████  ✅ 語料健康度 — **7A `db health`／7B 路徑解析／7C 分鏡回程／7D 介面中文化補完**
 ```
 
-**目前版本**：**v1.3.1** ｜ **測試**：**1095 passing**（2026-09-03 於本支實跑）｜ **DB schema**：**v18**
+**目前版本**：**v1.4.1** ｜ **DB schema**：**v19**
 
-> 基準寫清楚免得下一個人重數：`master` 1086 ＋ 本支 9 ＝ **1095**。schema **v17**（v14 `shots`／v15 `shot_labels`／v16 `translations`／v17 `shot_labels.prompt_hash`）。
+> schema 階梯：v14 `shots`／v15 `shot_labels`／v16 `translations`／v17 `shot_labels.prompt_hash`／v18 `shot_motion`／v19 `shot_motion.zoom`+`rotation`。
 >
-> ⚠️ 上一版這兩行**自己互相矛盾** —— 同一段一行寫 schema v15、下一行寫 v16。這種東西不會有人來報，只會在下次有人拿它當基準時才發作。
+> 🔴 **這兩行以前寫過三次互相矛盾的數字，而且是連續的。** 上上版一行 schema v15、下一行 v16；上一版修好了那個，同一段立刻變成一行 v18、下一行 v17 —— **警告這個失效模式的註記，就掛在一個活生生的實例正上方**。
+>
+> 2026-09-05 起這兩個數字由 `tests/test_docs_are_current.py` 對 `reel_scout.__version__` 與 `db.SCHEMA_VERSION` 驗證，改碼不改這行會紅。**測試數不再寫在這裡** —— 它每次 PR 都變，是最會漂的那種值，而且沒有任何人靠它做決定。
 
 > 上一版此行寫「v1.2.0／324 passing／schema v9」，三個數字全是 2026-07-20 的舊值。
 

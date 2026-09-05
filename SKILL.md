@@ -129,6 +129,7 @@ invent flags beyond these):
 - `--vlm-model NAME` — VLM model name
 - `--keyframe-strategy NAME` — keyframe strategy (`scene`, `interval`, `hybrid`)
 - `--keyframe-max N` — max keyframes per video (overrides the auto duration budget)
+- `--force-keyframes` — re-extract keyframes even if this clip already has some
 - `--resolution N` — upscale keyframes to this long-edge **px** so the VLM can read
   small on-screen text (`0` = native; this is **pixels, not a timestamp**)
 - `--start SEC` — focus-window start in **seconds** (float); only extract keyframes from `[start, end]`
