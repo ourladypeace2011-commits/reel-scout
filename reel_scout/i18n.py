@@ -294,6 +294,7 @@ VALUE_KEYS = (
     "ECU", "CU", "MCU", "MS", "MLS", "LS", "ELS", "UNKNOWN",
     # shot movement (§6C)
     "static", "still_subject_moves", "camera_moves", "unsteady", "unknown",
+    "unsupported",
 )
 
 #: Traditional Chinese for each. English is the value itself, so the baseline
@@ -312,6 +313,7 @@ _VALUE_ZH = {
     "MLS": "中遠景", "LS": "遠景", "ELS": "大遠景", "UNKNOWN": "不適用",
     "static": "固定", "still_subject_moves": "機位不動·畫面內有動作",
     "camera_moves": "運鏡", "unsteady": "手持/不穩", "unknown": "幀數不足",
+    "unsupported": "此編碼無運動向量",
     "visit": "到店",
     "none": "無",
 }

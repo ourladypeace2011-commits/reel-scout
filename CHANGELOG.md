@@ -4,6 +4,37 @@
 
 ### Fixed
 
+- **"This codec has no motion vectors" was reported as "this shot was too
+  short".** FFmpeg exports motion vectors for H.264; HEVC, VP9 and AV1 give
+  none, and an all-intra file has none to give. All three decoded fine, yielded
+  nothing, and landed in `UNKNOWN` — whose explanation, in the CLI and in the
+  Chinese UI (`幀數不足`), is a claim about the length of a shot. The truth is
+  a claim about the container, and no amount of re-running changes it.
+
+  Measured 2026-09-05 on real files: `pan_hevc`, `pan_vp9` and an all-intra
+  H.264 all returned `frames=0`; a genuinely short H.264 shot returned
+  `frames=5`. The two are now `unsupported` and `unknown`. The library today is
+  118/118 H.264 so nothing was mislabelled yet — but `analyze <local path>`
+  takes any file, and **an iPhone shoots HEVC by default**.
+
+  A file that decodes *nothing* stays `unknown`: an unreadable stream is not
+  evidence about the codec.
+
+### Notes
+
+- `MIN_FRAMES = 8` now says out loud that it has **no measurement behind it**,
+  unlike `SPEED_FLOOR`, which sits on a measured hard zero. It asserts that
+  eight frames are enough and seven are not, and nothing was run to separate
+  them. Recorded rather than quietly kept: a threshold whose provenance is "it
+  seemed right" is the kind that survives for years by never being questioned.
+- `speed` is **not** `hypot(dx, dy)`, and the stored row now says so. They are
+  different statistics on purpose — `dx`/`dy` are the medians of each component
+  ("which way, typically"), `speed` is the median of the magnitudes ("how fast,
+  typically"). A shot that drifts left as often as right has `dx ≈ 0` and a
+  speed well above zero, and only the second answers "is this moving". A reader
+  who assumed the identity could not reproduce the classification from the row.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05): R1, R10.
+
 - **Four ways of declining to answer were read as the model saying "no".**
   `parse_gate_answer` prefix-matched `NO`, so `Not sure`, `None`, `Nope` and
   `NOTE: unclear` all came back False — and a False is stored as a confident
