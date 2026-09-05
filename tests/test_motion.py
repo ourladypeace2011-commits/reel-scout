@@ -383,6 +383,72 @@ def test_frames_are_bound_to_the_shot_whose_span_contains_them():
         conn.close(); os.unlink(path)
 
 
+# --- "no vectors" is not "too few frames" (2026-09-05) -----------------------
+
+def test_a_file_whose_codec_exports_no_vectors_says_so():
+    # HEVC, VP9, AV1 and an all-intra H.264 all decode fine and yield nothing.
+    # Reported as `unknown` they read as "this shot was too short", which is a
+    # claim about the clip; the truth is a claim about the container, and no
+    # re-run changes it. Verified on real files 2026-09-05: pan_hevc, pan_vp9
+    # and an all-intra H.264 all returned frames=0, while a genuinely short
+    # H.264 shot returned frames=5.
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, shots=((0, 0.0, 5.0),))
+        frames = [_Frame(i, None) for i in range(30)]   # decoded, no side data
+        with patch.dict(sys.modules, _fake_av(frames)):
+            rows = motion.shot_motion(conn, vid, "f.mp4")
+        assert rows[0]["movement"] == motion.UNSUPPORTED
+        assert rows[0]["frames"] == 0
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_short_shot_in_a_readable_file_is_still_unknown():
+    # The other side of the split: vectors exist, this shot just has too few.
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, shots=((0, 0.0, 5.0),))
+        few = [_Frame(2 * i, _mvs([(1.0, 0.0)] * 16))
+               for i in range(motion.MIN_FRAMES - 1)]
+        with patch.dict(sys.modules, _fake_av(few)):
+            rows = motion.shot_motion(conn, vid, "f.mp4")
+        assert rows[0]["movement"] == motion.UNKNOWN
+        assert 0 < rows[0]["frames"] < motion.MIN_FRAMES
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_file_that_decodes_nothing_at_all_is_unknown_not_unsupported():
+    # An empty or unreadable stream is not evidence about the codec.
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, shots=((0, 0.0, 5.0),))
+        with patch.dict(sys.modules, _fake_av([])):
+            rows = motion.shot_motion(conn, vid, "f.mp4")
+        assert rows[0]["movement"] == motion.UNKNOWN
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_the_stored_speed_is_not_the_length_of_the_stored_dx_dy():
+    # R10: they are different statistics on purpose, and a reader who assumes
+    # otherwise cannot reproduce the classification from the row. A shot that
+    # drifts left as often as right has dx ~ 0 and a speed well above it.
+    conn, path = _temp_db()
+    try:
+        vid = _clip(conn, shots=((0, 0.0, 5.0),))
+        swing = [(0.1 * i, 6.0 if i % 2 else -6.0, 0.0, 0.0, 0.0, 0.9)
+                 for i in range(20)]
+        with patch.object(motion, "frame_motion", return_value=iter(swing)):
+            rows = motion.shot_motion(conn, vid, "f.mp4")
+        r = rows[0]
+        assert abs(r["dx"]) < 1e-9 and r["speed"] == pytest.approx(6.0)
+        assert r["movement"] == motion.CAMERA_MOVES
+    finally:
+        conn.close(); os.unlink(path)
+
+
 def test_a_clip_with_no_shots_measures_nothing():
     conn, path = _temp_db()
     try:

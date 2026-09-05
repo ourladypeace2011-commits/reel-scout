@@ -971,6 +971,15 @@ def _cmd_motion(args) -> None:
         # work.
         print("  still_subject_moves = the camera holds while something inside "
               "the frame moves — not camera work")
+    if tally.get(motion.UNSUPPORTED):
+        # Not "too few frames", which is what this said until 2026-09-05. The
+        # file gives no vectors at all, so there is nothing to re-run and no
+        # shot is at fault. FFmpeg exports them for H.264 only; HEVC, VP9 and
+        # AV1 give none, and neither does an all-intra file.
+        print("  unsupported = this file's codec exports no motion vectors "
+              "(H.264 does; HEVC, VP9 and AV1 do not, and neither does an "
+              "all-intra file). Nothing to re-run — re-encode to H.264 if you "
+              "need the reading", file=sys.stderr)
     if tally.get(motion.UNKNOWN):
         print("  unknown = fewer than %d coded frames in the shot; a median "
               "over three frames is not a median" % motion.MIN_FRAMES,

@@ -75,6 +75,22 @@ STILL_SUBJECT_MOVES = "still_subject_moves"
 CAMERA_MOVES = "camera_moves"
 UNSTEADY = "unsteady"
 UNKNOWN = "unknown"
+
+#: The codec exported no motion vectors for this file at all.
+#:
+#: 🔴 **Split from `UNKNOWN` because they have different remedies and only one
+#: of them is about the clip.** FFmpeg exports vectors for H.264; HEVC, VP9 and
+#: AV1 give none, and an all-intra file has none to give. All three used to
+#: produce `frames=0` and land in `UNKNOWN`, whose explanation — in the CLI and
+#: in the Chinese UI — says "too few coded frames". That reads as a fact about
+#: a short shot. It is a fact about the container, and no amount of re-running
+#: changes it.
+#:
+#: Measured 2026-09-05: `pan_hevc`, `pan_vp9` and an all-intra H.264 all
+#: returned `frames=0`; a genuinely short H.264 shot returned `frames=5`. The
+#: library today is 118/118 H.264 so nothing was mislabelled yet — but
+#: `analyze <local path>` takes any file, and an iPhone shoots HEVC by default.
+UNSUPPORTED = "unsupported"
 MOVEMENTS = (STATIC, STILL_SUBJECT_MOVES, CAMERA_MOVES, UNSTEADY)
 
 #: Pixels per frame below which the frame is not travelling. Set from the
@@ -90,6 +106,13 @@ AGREEMENT_FLOOR = 0.6
 
 #: A shot shorter than this many coded frames is reported `UNKNOWN` rather than
 #: guessed at. Medians over three frames are not medians.
+#:
+#: ⚠️ **Unlike `SPEED_FLOOR`, this number has no measurement behind it.** It is
+#: an assertion that eight is enough and seven is not, and nothing was run to
+#: separate them — 4, 8 and 12 would each have sounded equally reasonable when
+#: it was written. Recorded rather than quietly kept, because a threshold whose
+#: provenance is "it seemed right" is the kind that survives for years by never
+#: being questioned. At 30fps this is roughly a quarter-second of coded frames.
 MIN_FRAMES = 8
 
 #: Scale and rotation accumulated **across the whole shot** — 3% and 3 degrees
@@ -207,7 +230,22 @@ def _fit_similarity(np, ux, uy, dxs, dys):
     return zoom, -math.atan2(b, 1.0 + a), tx, ty, agree
 
 
-def frame_motion(path: str) -> Iterator[Tuple[float, float, float, float, float, float]]:
+def read_motion(path: str):
+    """`(rows, saw_frames)` — the per-frame readings, and whether any frame was
+    decoded at all.
+
+    Exists so the caller can tell "this shot is too short" from "this file has
+    no vectors to read": both arrive as an empty list, and only one of them is
+    about the clip. A file that decoded frames and yielded no readings has a
+    codec that does not export motion vectors, or is coded entirely intra.
+    """
+    saw = [False]
+    rows = list(frame_motion(path, _decoded=saw))
+    return rows, saw[0]
+
+
+def frame_motion(path: str, _decoded=None
+                 ) -> Iterator[Tuple[float, float, float, float, float, float]]:
     """`(t_sec, dx, dy, zoom, rotation, agreement)` per inter-coded frame.
 
     `zoom` and `rotation` are per frame; the caller accumulates them across the
@@ -233,6 +271,8 @@ def frame_motion(path: str) -> Iterator[Tuple[float, float, float, float, float,
         stream.codec_context.flags2 |= Flags2.export_mvs
         time_base = float(stream.time_base)
         for frame in container.decode(stream):
+            if _decoded is not None:
+                _decoded[0] = True
             side = frame.side_data.get("MOTION_VECTORS")
             if side is None:
                 # Intra-coded: nothing was predicted, so nothing moved *here*.
@@ -301,7 +341,11 @@ def shot_motion(conn, video_id: str, path: str) -> List[Dict[str, Any]]:
         "ORDER BY idx", (video_id,)).fetchall()
     if not shots:
         return []
-    frames = list(frame_motion(path))
+    frames, saw_frames = read_motion(path)
+    # Decoded something, read nothing: the container has no vectors to give.
+    # Every shot gets the same answer because it is the same fact about the
+    # file, not a property of any shot in it.
+    blank = UNSUPPORTED if (saw_frames and not frames) else UNKNOWN
     out: List[Dict[str, Any]] = []
     for shot in shots:
         inside = [f for f in frames if shot["start_sec"] <= f[0] < shot["end_sec"]]
@@ -309,8 +353,15 @@ def shot_motion(conn, video_id: str, path: str) -> List[Dict[str, Any]]:
             out.append({"idx": shot["idx"], "t_sec": shot["start_sec"],
                         "dx": None, "dy": None, "speed": None,
                         "agreement": None, "zoom": None, "rotation": None,
-                        "frames": len(inside), "movement": UNKNOWN})
+                        "frames": len(inside), "movement": blank})
             continue
+        # ⚠️ `speed` is NOT `hypot(dx, dy)`, and a reader who assumes it is
+        # will not be able to reproduce the classification from the stored
+        # row. They are two different statistics on purpose: `dx`/`dy` are the
+        # medians of each component ("which way, typically") and `speed` is the
+        # median of the magnitudes ("how fast, typically"). A shot that drifts
+        # left as often as right has dx ≈ 0 and a speed well above zero, and
+        # only the second of those is the answer to "is this moving".
         dx = float(np.median([f[1] for f in inside]))
         dy = float(np.median([f[2] for f in inside]))
         speed = float(np.median([(f[1] ** 2 + f[2] ** 2) ** 0.5 for f in inside]))
