@@ -10,9 +10,16 @@ this module's to make:
 
 Every row is stamped with `source` and `model`. That is not bookkeeping: the
 same clip scores 7.43 under `qwen3-vl:8b` and 5.5 under `qwen2.5vl:7b`, and a
-shot size is no less model-dependent than a craft score. Two passes with
-different models coexist rather than overwrite, and a reader choosing between
-them can see which is which.
+shot size is no less model-dependent than a craft score.
+
+⚠️ **`model` records which model produced the row that is there — it does not
+make two models' answers coexist.** The uniqueness key is
+`(video, kind, timestamp, source)` and `model` is not in it, so a second model
+run under the same source replaces the first. What coexists is *kinds of
+claim*: a model's reading and a person's correction are different claims and
+sit side by side. Two readings of the same frame by the same kind of asker are
+not two claims, they are one asker changing its mind. This docstring said the
+opposite until 2026-09-05, and so did the test named after it.
 
 **Measured cost** (2026-09-02, M2 Max, `qwen2.5vl:7b`, one representative frame
 per shot): 39 frames in 2.4 minutes ≈ 3.7 s/frame. The whole 2,872-frame library
@@ -88,7 +95,7 @@ SKIP_FORMATS = ("talking_head",)
 #: agree right up until the day one of them is edited, and the disagreement
 #: would surface as health saying "0 stale" while the re-run kept finding work.
 STALE_PROMPT_SQL = ("l.kind = 'shot_size' AND l.source IN (?, ?) "
-                    "AND COALESCE(l.prompt_hash, '') != ?")
+                    "AND COALESCE(l.prompt_hash, '') NOT IN (?, ?)")
 
 
 def stale_prompt_params() -> tuple:
@@ -99,7 +106,12 @@ def stale_prompt_params() -> tuple:
     moved ten-to-one when the prompt changed, so a label whose prompt cannot be
     established is not comparable to one whose can.
     """
-    return (SOURCE_VLM, SOURCE_GATE, prompt_fingerprint())
+    # Two current fingerprints, not one: `--no-gate` is a different procedure
+    # and stamps a different hash, and a row from either is current. Judging
+    # against only the gated one would put every ungated row permanently on
+    # the re-run list.
+    return (SOURCE_VLM, SOURCE_GATE,
+            prompt_fingerprint(True), prompt_fingerprint(False))
 
 
 def drop_superseded_label(conn, video_id: str, t_sec: float) -> int:
@@ -117,6 +129,32 @@ def drop_superseded_label(conn, video_id: str, t_sec: float) -> int:
         (video_id, t_sec) + stale_prompt_params())
     conn.commit()
     return cur.rowcount
+
+
+def orphaned_labels(conn, video_id: str) -> int:
+    """Labels hanging off frames this clip no longer has.
+
+    🔴 **The gap `--force-keyframes` opens, and why the obvious fix is wrong.**
+    Labels hang off a timestamp rather than a shot id so that re-analysis
+    cannot destroy them — written down, and guarded by
+    `test_a_refusal_leaves_labels_at_other_timestamps_alone`. But re-extracting
+    keyframes moves the timestamps, and a label left at 2.0s after the frame
+    moved to 2.5s is never visited again: `drop_superseded_label` matches
+    `t_sec = ?` exactly, and nothing asks about 2.0 any more.
+
+    Deleting those was the first fix written here, and it contradicted that
+    decision outright — the guard test caught it. **Unreachable is not the
+    same as wrong.** So the rows stay and the three readers that were treating
+    them as live were fixed instead: `stale_videos` no longer prescribes a
+    re-run that cannot reach them, `analysable` no longer counts frames that
+    are gone, and the inspector prefers a live label over an orphan in the
+    same span. This function only counts, so the operator can see them.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM shot_labels l WHERE l.video_id = ? "
+        "AND l.kind = 'shot_size' AND l.source != 'supplied' "
+        "AND NOT " + db.LIVE_FRAME_SQL, (video_id,)).fetchone()
+    return int(row["n"] or 0)
 
 
 def analysable(conn, video_id: str) -> Tuple[int, int]:
@@ -145,10 +183,11 @@ def analysable(conn, video_id: str) -> Tuple[int, int]:
     # was counted as two frames, so a library with a gate pass reported a
     # denominator twice its own size.
     row = conn.execute(
-        "SELECT COUNT(DISTINCT t_sec) AS total, "
-        "COUNT(DISTINCT CASE WHEN value != ? THEN t_sec END) AS scaled "
-        "FROM shot_labels WHERE video_id = ? AND kind = 'shot_size' "
-        "AND source != 'supplied'", (UNKNOWN, video_id)).fetchone()
+        "SELECT COUNT(DISTINCT l.t_sec) AS total, "
+        "COUNT(DISTINCT CASE WHEN l.value != ? THEN l.t_sec END) AS scaled "
+        "FROM shot_labels l WHERE l.video_id = ? AND l.kind = 'shot_size' "
+        "AND l.source != 'supplied' AND " + db.LIVE_FRAME_SQL,
+        (UNKNOWN, video_id)).fetchone()
     return int(row["scaled"] or 0), int(row["total"] or 0)
 
 
@@ -159,9 +198,14 @@ def stale_videos(conn) -> List[str]:
     the list up front cannot tell a clip that finished from a clip that failed —
     both simply stop appearing in its loop.
     """
+    # `AND <live>`: a stale label on a frame that no longer exists cannot be
+    # re-run, so listing its clip here would hand the operator a remedy that
+    # cannot work -- the exact "cannot" that `db health` exists to separate
+    # from "not yet".
     rows = conn.execute(
         "SELECT DISTINCT l.video_id FROM shot_labels l WHERE " +
-        STALE_PROMPT_SQL + " ORDER BY l.video_id", stale_prompt_params())
+        STALE_PROMPT_SQL + " AND " + db.LIVE_FRAME_SQL +
+        " ORDER BY l.video_id", stale_prompt_params())
     return [r["video_id"] for r in rows]
 
 
@@ -333,8 +377,8 @@ def label_video(conn, video_id: str, model: str,
     # library keeps paying for, and it took one run to build a fresh one.
     tally: Dict[str, Any] = {"labelled": 0, "unknown": 0, "refused": 0,
                              "unreachable": 0, "inconclusive": 0, "dropped": 0,
-                             "collapsed": 0, "gated": 0, "skipped": 0,
-                             "missing": 0, "skipped_format": None}
+                             "collapsed": 0, "orphaned": 0, "gated": 0,
+                             "skipped": 0, "missing": 0, "skipped_format": None}
     if not force:
         fmt = skip_reason(conn, video_id)
         if fmt:
@@ -404,9 +448,13 @@ def label_video(conn, video_id: str, model: str,
             # Supplied labels did not come from our prompt, so they carry no
             # fingerprint — stamping one would claim a provenance they do not
             # have.
-            prompt_fingerprint() if source in MODEL_SOURCES else None,
+            prompt_fingerprint(gate) if source in MODEL_SOURCES else None,
             # A model row replaces the other model source at this frame; a
             # supplied one replaces neither.
             supersedes=MODEL_SOURCES if source in MODEL_SOURCES else ())
         tally["unknown" if code == UNKNOWN else "labelled"] += 1
+    # Counted, never deleted -- see `orphaned_labels`. Reported because a row
+    # nothing can reach is invisible otherwise, and invisible is how it stayed
+    # on the page for a month.
+    tally["orphaned"] = orphaned_labels(conn, video_id)
     return tally

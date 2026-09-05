@@ -134,9 +134,13 @@ def test_every_stored_row_carries_the_model_that_produced_it():
         conn.close(); os.unlink(path)
 
 
-def test_two_models_coexist_instead_of_overwriting():
-    # A craft score taught this repo that a model-produced value without its
-    # origin is unusable the moment a second model touches the library.
+def test_a_model_reading_and_a_persons_correction_coexist():
+    # Renamed 2026-09-05. It was `test_two_models_coexist_instead_of_overwriting`
+    # and it never tested two models: both rows below are different *sources*.
+    # `model` is not in the uniqueness key, so a second model under the same
+    # source replaces the first -- which is correct (one asker changing its
+    # mind is not two claims) but is the opposite of what the name promised.
+    # See `test_a_second_model_replaces_the_first_it_does_not_sit_beside_it`.
     conn, path = _temp_db()
     try:
         vid = _seed(conn, frames=((11, 2.0),))
@@ -145,6 +149,60 @@ def test_two_models_coexist_instead_of_overwriting():
         rows = db.get_shot_labels(conn, vid, kind="shot_size")
         assert len(rows) == 2
         assert {r["value"] for r in rows} == {"CU", "MS"}
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_second_model_replaces_the_first_it_does_not_sit_beside_it():
+    # The behaviour the renamed test above claimed to cover, now actually
+    # covered -- and asserted as replacement, because that is what happens and
+    # two docstrings said otherwise until 2026-09-05.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "qwen2.5vl:7b")
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "MS", "vlm", "qwen3-vl:8b")
+        rows = db.get_shot_labels(conn, vid, kind="shot_size")
+        assert [(r["value"], r["model"]) for r in rows] == [("MS", "qwen3-vl:8b")]
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_a_label_whose_keyframe_is_gone_is_kept_but_not_counted():
+    # R6, and the fix that was *not* made: deleting these contradicts the
+    # decision that labels hang off timestamps so re-analysis cannot destroy
+    # them (`test_a_refusal_leaves_labels_at_other_timestamps_alone` guards
+    # it). Unreachable is not wrong -- so the row stays, and the readers stop
+    # treating it as a live measurement.
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m",
+                           label_shots.prompt_fingerprint())
+        # The orphan: a keyframe that used to be at 2.5 and is not any more.
+        db.save_shot_label(conn, vid, 2.5, "shot_size", "ECU", "vlm", "m", "OLD")
+        assert label_shots.orphaned_labels(conn, vid) == 1
+        # Kept.
+        assert len(db.get_shot_labels(conn, vid, kind="shot_size")) == 2
+        # Not counted, and not prescribed a re-run that cannot reach it.
+        assert label_shots.analysable(conn, vid) == (1, 1)
+        assert label_shots.stale_videos(conn) == []
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_an_orphan_does_not_win_a_span_from_a_live_reading():
+    # Sizes match a shot by span, not equality, so the earliest timestamp in
+    # the span wins -- and after `--force-keyframes` that is often the orphan.
+    from reel_scout import inspector
+    conn, path = _temp_db()
+    try:
+        vid = _seed(conn, frames=((11, 2.0),))
+        db.save_shot_label(conn, vid, 0.5, "shot_size", "ECU", "vlm", "m", "OLD")
+        db.save_shot_label(conn, vid, 2.0, "shot_size", "CU", "vlm", "m",
+                           label_shots.prompt_fingerprint())
+        rows = inspector._shot_grammar(conn, vid)["rows"]
+        assert rows[0]["size"] == "CU"
     finally:
         conn.close(); os.unlink(path)
 
@@ -344,7 +402,10 @@ def test_a_vlm_label_records_the_prompt_that_produced_it():
              patch.object(label_shots, "classify_with_ollama", return_value=("MCU", None)):
             label_shots.label_video(conn, vid, "m", gate=False)
         row = db.get_shot_labels(conn, vid, kind="shot_size")[0]
-        assert row["prompt_hash"] == prompt_fingerprint()
+        # `gate=False` above, so the ungated fingerprint -- stamping the gated
+        # one would claim the gate ran on a run that never asked it.
+        assert row["prompt_hash"] == prompt_fingerprint(gate=False)
+        assert prompt_fingerprint(True) != prompt_fingerprint(False)
     finally:
         conn.close(); os.unlink(path)
 

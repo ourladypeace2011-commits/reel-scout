@@ -114,6 +114,11 @@ def collect(conn) -> Dict[str, Any]:
         ]),
         "measurable": measurable,
         "with_shots": with_shots,
+        "orphaned_shot_labels": _one(
+            conn,
+            "SELECT COUNT(*) FROM shot_labels l JOIN videos v ON v.id = l.video_id "
+            "WHERE l.kind = 'shot_size' AND l.source != 'supplied' "
+            "AND NOT " + db.LIVE_FRAME_SQL + _NOT_INVALID),
         "with_shot_labels": _one(
             conn, "SELECT COUNT(DISTINCT l.video_id) FROM shot_labels l "
                   "JOIN videos v ON v.id = l.video_id WHERE 1=1" + _NOT_INVALID),
@@ -186,10 +191,27 @@ def findings(h: Dict[str, Any]) -> List[Dict[str, Any]]:
         "%d clip(s) labelled" % h["with_shot_labels"],
         "shot-size <video> (interviews are skipped by default)")
 
+    orphans = h.get("orphaned_shot_labels") or 0
+    add("shot-size frames", orphans == 0,
+        "%d label(s) whose keyframe no longer exists" % orphans,
+        # No fix offered on purpose: there is nothing to run. The frame moved
+        # (`analyze --force-keyframes`), so the reading cannot be refreshed and
+        # cannot be reached. It is kept because a reading of a moment is not
+        # wrong just because we stopped sampling there -- but it is not
+        # evidence about any current frame either, and the counts above no
+        # longer include it.
+        None, actionable=False)
+
     old_prompt = h.get("labels_from_an_old_prompt") or 0
     add("shot-size prompt", old_prompt == 0,
         "%d label(s) from a prompt that is no longer current" % old_prompt,
-        "shot-size <video> re-runs them" if old_prompt else None,
+        # `--force` named because without it the prescription is a no-op on
+        # exactly the clips most likely to be holding old labels: interviews
+        # are skipped by default, so `shot-size <video>` returns having done
+        # nothing and the row stays red forever, telling the operator to run
+        # a command that cannot clear it.
+        "shot-size <video> --force (interviews are skipped without it)"
+        if old_prompt else None,
         actionable=old_prompt > 0)
 
     add("on-screen text", True, "%d clip(s)" % h["with_ocr"])

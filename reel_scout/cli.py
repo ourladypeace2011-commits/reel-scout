@@ -900,6 +900,15 @@ def _cmd_shot_size(args) -> None:
               "gets one model verdict, so the stale half was replaced rather "
               "than left to be counted twice" % tally["collapsed"],
               file=sys.stderr)
+    if tally["orphaned"]:
+        # Not an error and not actionable: `analyze --force-keyframes` moved
+        # the frames these were read off. Kept, because a reading of a moment
+        # is not wrong just because we stopped sampling there -- but excluded
+        # from the counts above, and from the page, because it is not evidence
+        # about any current frame either.
+        print("  %d label(s) hang off keyframes that no longer exist — kept, "
+              "but not counted and not shown; nothing to run" % tally["orphaned"],
+              file=sys.stderr)
     if tally["dropped"]:
         print("  dropped = %d label(s) from a retired prompt sat on frames this "
               "prompt cannot answer, so they were removed rather than left "

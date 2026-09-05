@@ -253,3 +253,37 @@ def test_health_is_quiet_when_every_label_is_from_the_current_prompt():
         assert _rows(conn)["shot-size prompt"]["actionable"] is False
     finally:
         conn.close(); os.unlink(path)
+
+
+# --- a prescription that cannot work is worse than none (2026-09-05) ---------
+
+def _findings_with(**overrides):
+    """Real snapshot, then the one or two numbers this test is about."""
+    conn, path = _temp_db()
+    try:
+        h = dict(health.collect(conn), **overrides)
+        return health.findings(h)
+    finally:
+        conn.close(); os.unlink(path)
+
+
+def test_the_stale_prompt_fix_names_force_because_interviews_are_skipped():
+    # `shot-size <video>` returns having done nothing on a talking_head clip,
+    # so the row stayed red forever while telling the operator to run a command
+    # that could not clear it. Interviews are also the clips most likely to be
+    # holding old labels, which made this a no-op in practice, not in theory.
+    row = [r for r in _findings_with(labels_from_an_old_prompt=3)
+           if r["label"] == "shot-size prompt"]
+    assert row, "the shot-size prompt finding should be present"
+    assert "--force" in (row[0]["fix"] or ""), row[0]["fix"]
+
+
+def test_an_orphaned_label_is_reported_with_no_remedy():
+    # There is nothing to run: the frame moved, so the reading can neither be
+    # refreshed nor reached. Offering a command would be the same lie the row
+    # above was telling.
+    row = [r for r in _findings_with(orphaned_shot_labels=2)
+           if r["label"] == "shot-size frames"]
+    assert row, "the orphan finding should be present"
+    assert row[0]["fix"] is None and row[0]["actionable"] is False
+    assert row[0]["ok"] is False

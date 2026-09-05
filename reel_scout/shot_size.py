@@ -213,35 +213,58 @@ def subject_gate_prompt() -> str:
     )
 
 
+#: `yes` or `no` as a whole word, after any leading punctuation.
+#:
+#: 🔴 **The word boundary is the fix, not decoration.** A bare `startswith("NO")`
+#: reads `Not sure`, `None`, `Nope` and `NOTE: unclear` as the model saying *no*
+#: — four ways of declining to answer, all stored as a confident `UNKNOWN`
+#: carrying the current fingerprint, which means the frame is never asked again.
+#: Under a four-token budget "Not sure" is a reply the model actually gives.
+#: Measured 2026-09-05: all four returned False before this, None after.
+#:
+#: Anchored rather than searched, deliberately: `there is no ambiguity, yes`
+#: has both words in it, and a search would answer on whichever came first.
+_GATE_RE = re.compile(r"^\W*(yes|no)\b", re.IGNORECASE)
+
+
 def parse_gate_answer(text) -> Optional[bool]:
     """True/False for a usable answer, None for anything else.
 
-    Prefix-matched rather than equality-matched: the model reliably leads with
-    the word and sometimes trails punctuation. Anything that is neither is a
-    refusal, and a refusal is not a NO — see `label_shots`, which falls through
-    to the classifier rather than silently marking the frame unusable.
+    Matched as a leading word rather than by equality: the model reliably leads
+    with it and sometimes trails punctuation, so `**No**` and `no.` both count.
+    Anything else is a refusal, and a refusal is not a NO — see `label_shots`,
+    which falls through to the classifier rather than silently marking the frame
+    unusable.
     """
     if not text:
         return None
-    t = text.strip().upper()
-    if t.startswith("YES"):
-        return True
-    if t.startswith("NO"):
-        return False
-    return None
+    m = _GATE_RE.match(text.strip())
+    return None if m is None else m.group(1).lower() == "yes"
 
 
-def prompt_fingerprint() -> str:
-    """Short hash of the current prompt, stored beside every label it produced.
+def prompt_fingerprint(gate: bool = True) -> str:
+    """Short hash of the current procedure, stored beside every label it made.
 
     A version number somebody has to remember to bump goes stale silently; a
     fingerprint of the actual text cannot. Same reasoning as
     `translations.source_hash`.
+
+    Two procedures produce shot sizes, so there are two fingerprints. A run
+    with `--no-gate` never asked the gate question, and stamping it with the
+    gate's fingerprint claims a procedure that did not run -- the same
+    conflation this column exists to end, one level up: v17 stopped two
+    *prompts* sharing a column, and this stops two *procedures* sharing one.
     """
-    # Both prompts, because both decide what a label says. A gate change that
-    # left the fingerprint alone would leave the column holding two different
-    # measurements again -- the exact thing the column was added to prevent.
+    # Both prompts under the default, because both decide what a label says. A
+    # gate change that left the fingerprint alone would leave the column
+    # holding two different measurements again.
     joined = subject_gate_prompt() + "\n\n" + classification_prompt()
+    if not gate:
+        # Deliberately a separate string rather than a hash of the
+        # classification prompt alone: the two must never collide, and the
+        # gated one must keep the exact value it has always had so that the
+        # library's existing rows stay current instead of all going stale.
+        joined = "classification-only\n\n" + classification_prompt()
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 

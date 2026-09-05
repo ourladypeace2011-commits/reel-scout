@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Four ways of declining to answer were read as the model saying "no".**
+  `parse_gate_answer` prefix-matched `NO`, so `Not sure`, `None`, `Nope` and
+  `NOTE: unclear` all came back False — and a False is stored as a confident
+  `UNKNOWN` carrying the current fingerprint, which means the frame is never
+  asked again. Under the gate's four-token budget "Not sure" is a reply the
+  model actually gives. Now matched as a whole word, so those four fall
+  through to the classifier while `no.`, `**No**` and `No person, but a dog`
+  still answer. Anchored rather than searched, deliberately: *there is no
+  ambiguity, yes* contains both words.
+
+- **A run with `--no-gate` stamped the fingerprint of a procedure it never
+  ran.** The hash covered both prompts, so a classification-only run claimed
+  the gate had asked. v17 stopped two *prompts* sharing a column; this stops
+  two *procedures* sharing one. `--no-gate` now has its own fingerprint and
+  both count as current — the gated hash is **unchanged**, so the library's
+  827 existing rows stay current instead of all going stale at once.
+
+- **`db health` prescribed a command that cannot clear the row it appears on.**
+  Interviews are skipped by default, so `shot-size <video>` on a `talking_head`
+  clip returns having done nothing — and those are the clips most likely to be
+  holding old labels. The fix line now names `--force`.
+
+- **A label whose keyframe no longer exists was counted as a live reading.**
+  `analyze --force-keyframes` moves the timestamps a label hangs off, and
+  nothing ever asks about the old one again: `drop_superseded_label` matches
+  `t_sec` exactly. The orphan then kept its clip on the re-run list forever,
+  counted in `analysable`, and — because sizes match a shot by *span* — was
+  what the inspector showed.
+
+  🔴 **The obvious fix was wrong and the repo's own test caught it.** Deleting
+  orphans contradicts a decision written down here: labels hang off timestamps
+  rather than shot ids *precisely* so re-analysis cannot destroy them, and
+  `test_a_refusal_leaves_labels_at_other_timestamps_alone` guards it. The first
+  version of this fix deleted them and turned that test red. **Unreachable is
+  not the same as wrong.** So the rows stay, and the three readers that were
+  treating them as live were fixed instead: `stale_videos` no longer prescribes
+  a re-run that cannot reach them, `analysable` counts only frames that exist,
+  and the inspector prefers a live label over an orphan in the same span.
+  `db health` reports them on their own row with **no fix offered**, because
+  there is nothing to run.
+
+### Changed
+
+- Two docstrings claimed that "two passes with different models coexist rather
+  than overwrite". They do not: `model` is not in the uniqueness key, so a
+  second model under the same source replaces the first. That behaviour is
+  correct — one asker changing its mind is not two claims — but it is the
+  opposite of what was documented, and of what
+  `test_two_models_coexist_instead_of_overwriting` was named after. The test
+  compared two *sources*, never two models. Renamed, and the missing case
+  added.
+- `shot-size` reports an `orphaned` count. Counted, never deleted.
+
+### Notes
+
+- Verified against the live library before shipping: **827 of 827 labels hang
+  off a keyframe that still exists**, so the orphan filter changes no current
+  reading. The measurement matters more than the zero — a filter this quiet
+  could have removed every number on the page and nothing would have said so.
+- Found by an independent read-only audit of 1.4.0 (2026-09-05): R2, R3, R4,
+  R5, R6.
+
 ## 1.4.1 — 2026-09-05
 
 ### Fixed
