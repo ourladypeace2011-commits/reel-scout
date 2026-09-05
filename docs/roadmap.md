@@ -51,9 +51,10 @@ Phase 5  ████████████████████  ✅ Tool 
 Phase 5+ ████████████████████  ✅ 靜默錯誤清剿（2026-07-22 → 08-26，v1.3.x + Unreleased；下方「2026-07-21 之後」清單）
 Phase 6  ████████████████████  ✅ Shot-level 反解 — **6A/6B/6C/6D/6E 完成**（6C 於 2026-09-03 換訊號來源後重啟出貨）
 Phase 7  ████████████████████  ✅ 語料健康度 — **7A `db health`／7B 路徑解析／7C 分鏡回程／7D 介面中文化補完**
+Phase 8  ████████████████████  ✅ 外部審計收斂（2026-09-05，v1.4.1 + v1.4.2）— 一次獨立唯讀審計的 **3 Blocker ＋ 10 Real 全數收掉**，並把「文件宣稱」變成可執行的 gate
 ```
 
-**目前版本**：**v1.4.1** ｜ **DB schema**：**v19**
+**目前版本**：**v1.4.2** ｜ **DB schema**：**v19**
 
 > schema 階梯：v14 `shots`／v15 `shot_labels`／v16 `translations`／v17 `shot_labels.prompt_hash`／v18 `shot_motion`／v19 `shot_motion.zoom`+`rotation`。
 >
