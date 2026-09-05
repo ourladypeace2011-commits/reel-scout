@@ -519,7 +519,14 @@ def _grammar_db(sizes=(), motions=(), shots=((0, 0.0, 5.0), (1, 5.0, 10.0))):
     for idx, a, b in shots:
         conn.execute("INSERT INTO shots (video_id, idx, start_sec, end_sec) "
                      "VALUES ('v1', ?, ?, ?)", (idx, a, b))
-    for t_sec, value in sizes:
+    for i, (t_sec, value) in enumerate(sizes):
+        # A keyframe at the same instant, because in production a shot size is
+        # only ever read off one -- and since 2026-09-05 a label whose frame is
+        # gone is treated as an orphan rather than a live reading.
+        conn.execute("INSERT INTO keyframes (video_id, frame_index, "
+                     "timestamp_sec, file_path, strategy) "
+                     "VALUES ('v1', ?, ?, ?, 'scene')",
+                     (i, t_sec, "/tmp/f%d.jpg" % i))
         db.save_shot_label(conn, "v1", t_sec, "shot_size", value, "vlm", "m")
     if motions:
         db.save_shot_motion(conn, "v1", [

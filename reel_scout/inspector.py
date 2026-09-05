@@ -110,6 +110,12 @@ def _shot_grammar(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
         if rank >= ranked.get(row["t_sec"], 0):
             sizes[row["t_sec"]] = row["value"]
             ranked[row["t_sec"]] = rank
+    # An orphan -- a label whose frame is gone after `--force-keyframes` --
+    # keeps its row but must not win a span from a label that was actually
+    # measured this run. Sizes are matched to a shot by span, not equality, so
+    # without this the earliest timestamp in the span wins and that is often
+    # the orphan.
+    live = db.live_label_timestamps(conn, video_id)
     motions = {r["t_sec"]: r for r in db.get_shot_motion(conn, video_id)}
     shots = conn.execute(
         "SELECT idx, start_sec, end_sec FROM shots WHERE video_id = ? "
@@ -121,9 +127,12 @@ def _shot_grammar(conn: db.sqlite3.Connection, video_id: str) -> Dict[str, Any]:
         # span rather than on its edge -- so match by span, not by equality.
         # Motion hangs off the span start, so that lookup is exact.
         size = None
-        for t_sec, value in sizes.items():
-            if start <= t_sec < shot["end_sec"]:
-                size = value
+        for want_live in (True, False):
+            for t_sec, value in sorted(sizes.items()):
+                if (t_sec in live) is want_live and start <= t_sec < shot["end_sec"]:
+                    size = value
+                    break
+            if size is not None:
                 break
         m = motions.get(start)
         if size is None and m is None:

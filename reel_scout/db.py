@@ -627,6 +627,10 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     of an old description, and a shot size a person typed are three different
     claims, and the uniqueness key includes `source` so all three can coexist
     rather than overwrite each other.
+
+    ⚠️ **`model` is not in the key.** It records which model produced the row
+    that is there; a second model under the same source replaces the first.
+    What coexists is kinds of claim, not readings — see `label_shots`.
     """
     conn.executescript(
         """
@@ -1294,6 +1298,20 @@ _CURRENT_RUN = (
 # opted into would be a silent hole, which is the shape of bug this package
 # keeps paying for.
 
+#: Whether the frame a `shot_labels` row (aliased `l`) hangs off still exists.
+#:
+#: 🔴 **Orphans are real, and deleting them was the wrong fix.** A label hangs
+#: off a timestamp rather than a shot id *precisely* so that re-analysis cannot
+#: destroy it — a decision this repo wrote down and a test guards. But
+#: `--force-keyframes` moves the timestamps, and a label left behind by that is
+#: unreachable: nothing will ever ask about 2.0s again once the frame moved to
+#: 2.5s. Unreachable is not the same as wrong. So the row stays, and every
+#: reader that would otherwise mistake it for a live reading asks this instead.
+LIVE_FRAME_SQL = (
+    "EXISTS (SELECT 1 FROM keyframes k WHERE k.video_id = l.video_id "
+    "        AND k.timestamp_sec = l.t_sec AND " + _CURRENT_RUN + ")"
+)
+
 
 def begin_keyframe_run(
     conn: sqlite3.Connection,
@@ -1597,6 +1615,20 @@ def get_shot_labels(conn: sqlite3.Connection, video_id: str,
         sql += " AND kind = ?"
         params.append(kind)
     return conn.execute(sql + " ORDER BY t_sec, source", params).fetchall()
+
+
+def live_label_timestamps(conn: sqlite3.Connection, video_id: str) -> set:
+    """Timestamps of this clip's labels whose keyframe still exists.
+
+    Its own query rather than a column on :func:`get_shot_labels`, because a
+    generic accessor that joins `keyframes` stops working on a database where
+    that table has not been created yet -- which a migration test does, and
+    which is a coupling worth not having for one caller's convenience.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT l.t_sec FROM shot_labels l WHERE l.video_id = ? "
+        "AND " + LIVE_FRAME_SQL, (video_id,)).fetchall()
+    return {r["t_sec"] for r in rows}
 
 def source_fingerprint(text: Optional[str]) -> str:
     """Stable fingerprint of the text a translation was made from."""

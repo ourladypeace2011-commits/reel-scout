@@ -101,3 +101,37 @@ def test_parse_answer_does_not_dig_a_code_out_of_a_sentence():
     assert pa("the focus is accurate") is None
     assert pa("I think this is a medium shot of two people") is None
     assert pa("Sorry, I cannot classify this image.") is None
+
+
+# --- a refusal is not a NO (2026-09-05) --------------------------------------
+
+@pytest.mark.parametrize("reply", ["Not sure", "None", "Nope", "NOTE: unclear",
+                                   "Nothing identifiable"])
+def test_a_word_starting_with_no_is_not_the_word_no(reply):
+    # `startswith("NO")` read all of these as the model saying *no subject* --
+    # and a NO is stored as a confident UNKNOWN carrying the current
+    # fingerprint, so the frame is never asked again. Under a four-token budget
+    # "Not sure" is a reply the model actually gives.
+    assert shot_size.parse_gate_answer(reply) is None
+
+
+@pytest.mark.parametrize("reply, want", [
+    ("no", False), ("NO.", False), ("**No**", False), ("no ", False),
+    ("No person, but a dog", False),
+    ("yes", True), ("YES!", True), ("Yes, a person", True),
+])
+def test_the_word_itself_still_answers(reply, want):
+    assert shot_size.parse_gate_answer(reply) is want
+
+
+def test_a_run_without_the_gate_does_not_claim_the_gate_ran():
+    # v17 stopped two prompts sharing a column; this stops two *procedures*
+    # sharing one. A `--no-gate` run never asked the gate question.
+    assert shot_size.prompt_fingerprint(True) != shot_size.prompt_fingerprint(False)
+
+
+def test_the_gated_fingerprint_is_unchanged_so_stored_rows_stay_current():
+    # Load-bearing: this is the value the library's 827 rows carry. Changing it
+    # would make every one of them stale at once, which is a migration dressed
+    # as a bug fix.
+    assert shot_size.prompt_fingerprint() == "e4546ad9e9787463"
