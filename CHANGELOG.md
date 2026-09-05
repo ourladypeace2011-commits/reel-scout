@@ -1,8 +1,75 @@
 # Changelog
 
-## Unreleased
+## 1.4.1 — 2026-09-05
 
 ### Fixed
+
+- **A model that answered nothing was deleting labels.** `shot-size` read every
+  HTTP 200 from ollama as text. ollama returns 200 carrying its own `error`
+  envelope, 200 with an empty string, and 200 with nothing but reasoning the
+  token budget cut off before any verdict — none of which is an answer. The
+  caller parsed the non-answer, failed, and reported `REFUSAL_UNPARSEABLE`:
+  *the model answered and broke the vocabulary*. That is the one verdict
+  allowed to retire a stored label, so `drop_superseded_label` ran and the row
+  went. Measured 2026-09-05: **`qwen3-vl:8b`, which wrote 2593 of this
+  library's vision descriptions, returns an empty string for both the gate and
+  the classifier** — so re-running `shot-size` with it after any prompt change
+  would have emptied the table rather than refilled it. Nothing was lost yet
+  only because all 827 stored labels still carry the current fingerprint.
+
+  A non-answer is now `REFUSAL_INCONCLUSIVE` and leaves stored rows alone,
+  alongside `unreachable`. Two boundaries came with it, because the useful
+  distinction is narrow and easy to overshoot in either direction:
+
+  - A reply that stopped at the token budget is only inconclusive **if it also
+    failed to parse**. `done_reason == "length"` on its own is not a failure —
+    a four-token budget holds `MCU` — and rejecting every truncated reply
+    would throw away good answers to avoid bad ones.
+  - `EUC` at temperature 0 with `done_reason == "stop"` is still
+    `REFUSAL_UNPARSEABLE`. The model answered; it will answer identically
+    forever; the retired row still goes.
+
+  The vision path had already learned this in 1.4.0 ("a 200 response with no
+  `response` field … is not a generate response at all"). `label_shots` had
+  not, which is the more useful half of the finding: **a lesson written into
+  the changelog had not crossed to the module three files away.**
+
+- **A keyframe whose file vanished mid-run took its label with it.** `missing`
+  is checked before the model is asked, so reaching the file reader at all is a
+  race — and that race landed in `refused`, which drops. Same asymmetry, third
+  face: only a verdict may retire a row.
+
+- **The gate and the classifier stored side by side, so a re-run never
+  converged.** They are two questions in one asking, but they wrote under
+  different `source` values — and `source` is part of the unique key, so
+  neither replaced the other. A frame answered by the gate on one run and the
+  classifier on the next ended up holding both rows. Three consequences, each
+  reproduced:
+
+  - the clip never left `stale_videos`, because one of its two rows always
+    carried the retired prompt. **This is precisely what #105 ("make a re-run
+    converge") claimed to fix**; it converges within a source and never
+    noticed the case across two.
+  - `analysable` counted one frame as two — and the caller prints that number
+    as `%d/%d frame(s)`, so a library with a gate pass reported a denominator
+    twice its own size.
+  - the inspector showed whichever source sorted first, and `gate` sorts
+    before `vlm`: a stale UNKNOWN covered a fresh CU.
+
+  A model row now replaces the other model source at the same frame: one
+  frame, one model verdict. `supplied` is deliberately **not** part of that —
+  a person's correction and a model's guess are different kinds of claim and
+  still sit side by side. Only the two halves of one asking collapse into each
+  other.
+
+- **A hand-supplied size outranked the model by alphabetical accident.** The
+  rule was in the code (`or row["source"] == "supplied"`) and the test passed
+  without it: `'supplied'` sorts before `'vlm'`, so it landed first and the
+  model row never overwrote it either way. `'gate'` does not sort before
+  `'supplied'` — so the first time a gated UNKNOWN and a human correction
+  shared a frame, the UNKNOWN would have won. Precedence is now stated rather
+  than read off the sort order, and the test that pins it uses a `gate` row,
+  which is the only arrangement that asks the question.
 
 - **A zoom was reported as a locked-off camera, with high confidence.**
   `motion` read `motion_x`/`motion_y` and took their median, which measures
@@ -62,11 +129,13 @@
   looked. `dx`/`dy` keep the codec's direction, unchanged, so v18 and v19 rows
   stay comparable; only the new columns use the reader's convention, where a
   positive `zoom` means the frame got tighter.
+
 - `frame_motion()` yields six values per frame instead of four, and
   `classify()` takes the shot's total zoom and rotation as optional arguments.
   `agreement` now means "the share of blocks the fit explains" rather than "the
   share matching one translation" — which is why a fast push-in stops reading
   as handheld.
+
 - `dx`/`dy` arrive from a least squares solve rather than a median, so they
   are no longer bit-exact: 4.0 comes back as 3.999999999999997.
 
@@ -77,92 +146,20 @@
   would call a move. Both are set from four synthetic clips, two true and two
   false: a thinner base than `SPEED_FLOOR`, which sits on a measured hard zero,
   and stated so the next person can widen them rather than trust them.
-- Found by an independent read-only audit of 1.4.0 (2026-09-05), B3.
-
-- **The gate and the classifier stored side by side, so a re-run never
-  converged.** They are two questions in one asking, but they wrote under
-  different `source` values — and `source` is part of the unique key, so
-  neither replaced the other. A frame answered by the gate on one run and the
-  classifier on the next ended up holding both rows. Three consequences, each
-  reproduced:
-
-  - the clip never left `stale_videos`, because one of its two rows always
-    carried the retired prompt. **This is precisely what #105 ("make a re-run
-    converge") claimed to fix**; it converges within a source and never
-    noticed the case across two.
-  - `analysable` counted one frame as two — and the caller prints that number
-    as `%d/%d frame(s)`, so a library with a gate pass reported a denominator
-    twice its own size.
-  - the inspector showed whichever source sorted first, and `gate` sorts
-    before `vlm`: a stale UNKNOWN covered a fresh CU.
-
-  A model row now replaces the other model source at the same frame: one
-  frame, one model verdict. `supplied` is deliberately **not** part of that —
-  a person's correction and a model's guess are different kinds of claim and
-  still sit side by side. Only the two halves of one asking collapse into each
-  other.
-
-- **A hand-supplied size outranked the model by alphabetical accident.** The
-  rule was in the code (`or row["source"] == "supplied"`) and the test passed
-  without it: `'supplied'` sorts before `'vlm'`, so it landed first and the
-  model row never overwrote it either way. `'gate'` does not sort before
-  `'supplied'` — so the first time a gated UNKNOWN and a human correction
-  shared a frame, the UNKNOWN would have won. Precedence is now stated rather
-  than read off the sort order, and the test that pins it uses a `gate` row,
-  which is the only arrangement that asks the question.
-
-### Notes
 
 - `shot-size` reports a `collapsed` count, non-zero only on the first run
   after this change: a silent DELETE is indistinguishable from data that was
   never there. One `shot-size <video>` run cleans that clip's duplicates,
   since every frame it visits is rewritten.
-- Found by an independent read-only audit of 1.4.0 (2026-09-05), B2 and
-  mutation M42.
-
-- **A model that answered nothing was deleting labels.** `shot-size` read every
-  HTTP 200 from ollama as text. ollama returns 200 carrying its own `error`
-  envelope, 200 with an empty string, and 200 with nothing but reasoning the
-  token budget cut off before any verdict — none of which is an answer. The
-  caller parsed the non-answer, failed, and reported `REFUSAL_UNPARSEABLE`:
-  *the model answered and broke the vocabulary*. That is the one verdict
-  allowed to retire a stored label, so `drop_superseded_label` ran and the row
-  went. Measured 2026-09-05: **`qwen3-vl:8b`, which wrote 2593 of this
-  library's vision descriptions, returns an empty string for both the gate and
-  the classifier** — so re-running `shot-size` with it after any prompt change
-  would have emptied the table rather than refilled it. Nothing was lost yet
-  only because all 827 stored labels still carry the current fingerprint.
-
-  A non-answer is now `REFUSAL_INCONCLUSIVE` and leaves stored rows alone,
-  alongside `unreachable`. Two boundaries came with it, because the useful
-  distinction is narrow and easy to overshoot in either direction:
-
-  - A reply that stopped at the token budget is only inconclusive **if it also
-    failed to parse**. `done_reason == "length"` on its own is not a failure —
-    a four-token budget holds `MCU` — and rejecting every truncated reply
-    would throw away good answers to avoid bad ones.
-  - `EUC` at temperature 0 with `done_reason == "stop"` is still
-    `REFUSAL_UNPARSEABLE`. The model answered; it will answer identically
-    forever; the retired row still goes.
-
-  The vision path had already learned this in 1.4.0 ("a 200 response with no
-  `response` field … is not a generate response at all"). `label_shots` had
-  not, which is the more useful half of the finding: **a lesson written into
-  the changelog had not crossed to the module three files away.**
-
-- **A keyframe whose file vanished mid-run took its label with it.** `missing`
-  is checked before the model is asked, so reaching the file reader at all is a
-  race — and that race landed in `refused`, which drops. Same asymmetry, third
-  face: only a verdict may retire a row.
-
-### Notes
 
 - `shot-size` gained an `inconclusive` count in its tally, reported separately
   from `refused` and `unreachable` for the reason those two were split in the
   first place: the operator needs to know **which run is worth repeating**, and
   the three causes have three different answers.
-- Found by an independent read-only audit of 1.4.0 (2026-09-05). The mutation
-  that removes this guard now fails six tests; before the fix it failed none.
+
+- Every one of these was found by a single independent read-only audit of 1.4.0 on 2026-09-05 (findings B1, B2, B3 and mutations
+  M21, M42). Each fix ships with the mutation that proves its guard has teeth: reverting it turns the new tests red, and before the
+  fixes the same mutations turned nothing red at all.
 
 ## 1.4.0 — 2026-09-04
 
